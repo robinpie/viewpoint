@@ -146,6 +146,19 @@ int main(void)
         return 1;
     }
 
+    /* notcurses enables any-motion tracking (?1003h) but then enables X11
+     * press/release tracking (?1000h). On terminals where the last-set mouse
+     * tracking mode wins (e.g. Konsole), that leaves us with press/release only
+     * and no button-held motion — so drags don't update live. Render once so
+     * notcurses flushes its own mouse setup, then re-assert button-event (drag)
+     * tracking + SGR encoding so a motion-reporting mode is the active one. */
+    wm_render(&wm);
+    {
+        static const char reassert[] = "\x1b[?1002h\x1b[?1003h\x1b[?1006h";
+        ssize_t rc = write(STDOUT_FILENO, reassert, sizeof(reassert) - 1);
+        (void)rc;
+    }
+
     struct pollfd *pfds = NULL;
     int pfds_cap = 0;
     bool quit = false;
@@ -240,6 +253,13 @@ int main(void)
     free(wm.wins);
     free(pfds);
     gpm_teardown(&wm);
+    /* Undo the motion-tracking modes we re-asserted (notcurses_stop resets the
+     * modes it set itself, but not our extra 1002). */
+    {
+        static const char off[] = "\x1b[?1002l\x1b[?1003l";
+        ssize_t rc = write(STDOUT_FILENO, off, sizeof(off) - 1);
+        (void)rc;
+    }
     notcurses_stop(nc);
     reap_children();
     if (g_dbg) {

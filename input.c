@@ -61,6 +61,20 @@ static const keychord g_keymap[] = {
 #undef A
 #undef AS
 
+/* Effective modifier mask. notcurses sets the NCKEY_MOD_* bits when a rich
+ * keyboard protocol (e.g. Kitty) is active, but in legacy input mode it only
+ * sets the deprecated ni->alt/shift/ctrl bools — e.g. Konsole's ESC-prefixed
+ * Alt+key arrives as alt=1 with modifiers==0. Fold both sources together so
+ * chords match regardless of which the terminal gave us. */
+static unsigned eff_mods(const ncinput *ni)
+{
+    unsigned mods = ni->modifiers & (NCKEY_MOD_SHIFT | NCKEY_MOD_ALT | NCKEY_MOD_CTRL);
+    if (ni->alt)   mods |= NCKEY_MOD_ALT;
+    if (ni->shift) mods |= NCKEY_MOD_SHIFT;
+    if (ni->ctrl)  mods |= NCKEY_MOD_CTRL;
+    return mods;
+}
+
 static void do_action(WM *wm, vp_action act)
 {
     switch (act) {
@@ -94,7 +108,7 @@ bool input_handle_key(WM *wm, const ncinput *ni)
         return false;
     }
 
-    unsigned mods = ni->modifiers & (NCKEY_MOD_SHIFT | NCKEY_MOD_ALT | NCKEY_MOD_CTRL);
+    unsigned mods = eff_mods(ni);
 
     /* Alt+1..9: focus/restore the window in taskbar slot N. */
     if (mods == NCKEY_MOD_ALT && ni->id >= '1' && ni->id <= '9') {
@@ -398,6 +412,15 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
 
 static void mouse_release(WM *wm, int btn, int y, int x, unsigned mods)
 {
+    /* Apply the final move/resize from the release position. Terminals that
+     * report button-held motion (drag) have already been updating live; those
+     * that report only press+release (e.g. Konsole) get the whole drag applied
+     * here, so the window snaps to the drop point either way. update_drag also
+     * re-evaluates the snap zone from this final position. */
+    if (wm->drag == DRAG_MOVE || wm->drag == DRAG_RESIZE) {
+        update_drag(wm, y, x);
+    }
+
     if (wm->drag == DRAG_MOVE && wm->snap_preview != SNAP_NONE) {
         Window *win = find_by_id(wm, wm->drag_win);
         if (win) {
@@ -443,8 +466,6 @@ void input_route_mouse(WM *wm, const ncinput *ni)
 {
     int y = ni->y, x = ni->x;
     unsigned mods = ni->modifiers;
-    vp_log("MOUSE id=%u y=%d x=%d evtype=%d mods=%u drag=%d\n",
-           ni->id, ni->y, ni->x, ni->evtype, ni->modifiers, wm->drag);
 
     switch (ni->id) {
     case NCKEY_BUTTON1:

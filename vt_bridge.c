@@ -209,9 +209,13 @@ void vt_mouse_button(Window *w, int button, bool pressed, VTermModifier mod)
 static VTermModifier vterm_mods(const ncinput *ni)
 {
     VTermModifier mod = VTERM_MOD_NONE;
-    if (ni->modifiers & NCKEY_MOD_SHIFT) mod |= VTERM_MOD_SHIFT;
-    if (ni->modifiers & NCKEY_MOD_ALT)   mod |= VTERM_MOD_ALT;
-    if (ni->modifiers & NCKEY_MOD_CTRL)  mod |= VTERM_MOD_CTRL;
+    /* Consult both the NCKEY_MOD_* bitmask (rich protocols like Kitty) and the
+     * deprecated alt/shift/ctrl bools, which are all notcurses sets in legacy
+     * input mode (e.g. Konsole's ESC-prefixed Alt arrives as alt=1, mods==0).
+     * Without this, Alt chords forwarded to the inner app lose their Alt. */
+    if ((ni->modifiers & NCKEY_MOD_SHIFT) || ni->shift) mod |= VTERM_MOD_SHIFT;
+    if ((ni->modifiers & NCKEY_MOD_ALT)   || ni->alt)   mod |= VTERM_MOD_ALT;
+    if ((ni->modifiers & NCKEY_MOD_CTRL)  || ni->ctrl)  mod |= VTERM_MOD_CTRL;
     return mod;
 }
 

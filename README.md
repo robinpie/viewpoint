@@ -133,6 +133,15 @@ modes). The keymap lives in a single table (`g_keymap[]` in `input.c`).
 On the bare Linux console, mouse input comes from `gpm`; in a graphical terminal,
 notcurses decodes the mouse. Only one source is used at a time.
 
+> **Mouse-mode note.** notcurses enables any-motion tracking and then X11
+> press/release tracking; on terminals where the last-set tracking mode wins
+> (e.g. **Konsole**) that would otherwise leave drags without live motion. After
+> startup viewpoint re-asserts button-event/any-motion tracking so a
+> motion-reporting mode stays active, which restores live drag everywhere.
+> As a belt-and-braces fallback, a move/resize/snap is also applied on button
+> *release*, so the gesture still completes even on a terminal that reports only
+> press and release.
+
 ---
 
 ## Architecture
