@@ -55,6 +55,10 @@
  * drag to arm an edge/corner snap. */
 #define VP_SNAP_EDGE 2
 
+/* Max gap (milliseconds) between two title-bar clicks for them to count as a
+ * double-click (which toggles maximize). */
+#define VP_DBLCLICK_MS 400
+
 /* ------------------------------------------------------------------------- */
 /* Global mode                                                               */
 /* ------------------------------------------------------------------------- */
@@ -215,6 +219,10 @@ typedef struct WM {
     int drag_ay;        /* anchor: original bottom row (for top-edge resize) */
     vp_snapzone snap_preview; /* currently-shown snap outline */
     struct ncplane *snap_plane;
+
+    /* Title-bar double-click tracking (double-click toggles maximize). */
+    uint64_t last_titleclick_ns; /* CLOCK_MONOTONIC of the last move-region click */
+    int last_titleclick_win;     /* id of the window it landed on (0 = none) */
 
     /* gpm */
     bool gpm_active;

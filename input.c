@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
 
 /* Step sizes for keyboard move/resize chords. */
 #define MOVE_STEP   2
@@ -703,6 +704,13 @@ static void content_forward(Window *win, mev_type t, int btn,
     }
 }
 
+static uint64_t now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
 /* ----- drag updates ----- */
 
 static void update_drag(WM *wm, int y, int x)
@@ -720,6 +728,12 @@ static void update_drag(WM *wm, int y, int x)
         if (ny > (int)wm->scr_rows - 1) ny = (int)wm->scr_rows - 1;
         if (nx < -(win->w - 2)) nx = -(win->w - 2);
         if (nx > (int)wm->scr_cols - 2) nx = (int)wm->scr_cols - 2;
+        /* Actually moving a maximized window pulls it out of maximize. We test
+         * for real displacement so a click that doesn't move (incl. the
+         * press/release of a double-click) leaves it maximized. */
+        if (win->maximized && (nx != win->x || ny != win->y)) {
+            win->maximized = false;
+        }
         window_set_geometry(win, nx, ny, win->w, win->h);
         /* Arm/disarm the edge snap based on the pointer, and keep the dragged
          * window above the outline so it stays visible. */
@@ -804,9 +818,21 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
         case HIT_CLOSE: win->dead = true; vp_log("close id=%d (button)\n", win->id); return;
         case HIT_MOVE:  break;
         }
-        if (win->maximized) {
-            win->maximized = false;
+        /* Move region: a second click here within VP_DBLCLICK_MS toggles
+         * maximize (the classic title-bar double-click). */
+        uint64_t t = now_ns();
+        if (wm->last_titleclick_win == win->id &&
+            t - wm->last_titleclick_ns <= (uint64_t)VP_DBLCLICK_MS * 1000000ull) {
+            wm->last_titleclick_win = 0;
+            wm_toggle_maximize(wm, win);
+            return;
         }
+        wm->last_titleclick_ns = t;
+        wm->last_titleclick_win = win->id;
+        /* Don't un-maximize yet: a maximized window stays maximized through the
+         * press so a stationary second click (double-click) can restore it via
+         * wm_toggle_maximize. update_drag drops the maximized flag only once the
+         * pointer actually moves, which turns the click into a move-drag. */
         wm->drag = DRAG_MOVE;
         wm->drag_win = win->id;
         wm->drag_off_x = relx;
