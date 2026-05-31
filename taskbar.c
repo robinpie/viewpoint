@@ -27,7 +27,7 @@
 #include <stdio.h>
 
 #define SLOT_W 18                 /* columns per window slot */
-#define MODE_W 13                 /* "PASSTHRU [P]" region width */
+#define MODE_W 13                 /* " PASSTHROUGH " region width */
 
 /* Computed layout, shared between draw and click so they stay in lockstep. */
 typedef struct {
@@ -133,10 +133,10 @@ void taskbar_draw(WM *wm)
         ncplane_set_fg_rgb8(t, 0x10, 0x10, 0x10);
         if (wm->mode == MODE_PASSTHROUGH) {
             ncplane_set_bg_rgb8(t, 0xe0, 0xa0, 0x30); /* amber: passthrough */
-            ncplane_putstr_yx(t, 0, g_mode_x0, " PASSTHRU [P]");
+            ncplane_putstr_yx(t, 0, g_mode_x0, " PASSTHROUGH ");
         } else {
             ncplane_set_bg_rgb8(t, 0x40, 0xc0, 0x60); /* green: interpret */
-            ncplane_putstr_yx(t, 0, g_mode_x0, " INTERPT  [K]");
+            ncplane_putstr_yx(t, 0, g_mode_x0, "  INTERPRET  ");
         }
     }
 

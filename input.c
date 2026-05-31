@@ -604,6 +604,7 @@ static void snap_geom(WM *wm, vp_snapzone z, int *gx, int *gy, int *gw, int *gh)
     case SNAP_TR:    *gx = hw; *gy = 0;  *gw = W - hw; *gh = hh;     break;
     case SNAP_BL:    *gx = 0;  *gy = hh; *gw = hw;     *gh = H - hh; break;
     case SNAP_BR:    *gx = hw; *gy = hh; *gw = W - hw; *gh = H - hh; break;
+    case SNAP_MAX:   *gx = 0;  *gy = 0;  *gw = W;      *gh = H;      break;
     default:         *gx = 0;  *gy = 0;  *gw = W;      *gh = H;      break;
     }
 }
@@ -618,6 +619,7 @@ static vp_snapzone snap_zone_at(WM *wm, int y, int x)
     bool bot = y > H - H / 4;
     if (L) return top ? SNAP_TL : bot ? SNAP_BL : SNAP_LEFT;
     if (R) return top ? SNAP_TR : bot ? SNAP_BR : SNAP_RIGHT;
+    if (y <= VP_SNAP_EDGE) return SNAP_MAX; /* top edge (not a corner) maximizes */
     return SNAP_NONE;
 }
 
@@ -871,7 +873,17 @@ static void mouse_release(WM *wm, int btn, int y, int x, unsigned mods)
 
     if (wm->drag == DRAG_MOVE && wm->snap_preview != SNAP_NONE) {
         Window *win = find_by_id(wm, wm->drag_win);
-        if (win) {
+        if (win && wm->snap_preview == SNAP_MAX) {
+            /* Dropping at the top edge maximizes. A real drag already cleared
+             * the maximized flag via displacement, so toggle just maximizes,
+             * saving the drop geometry as the restore target. Skip when already
+             * maximized: a plain click on a maximized window's title bar (which
+             * sits at the top edge) also arms SNAP_MAX, and must not toggle it
+             * back off. */
+            if (!win->maximized) {
+                wm_toggle_maximize(wm, win);
+            }
+        } else if (win) {
             int gx, gy, gw, gh;
             snap_geom(wm, wm->snap_preview, &gx, &gy, &gw, &gh);
             win->maximized = false;

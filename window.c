@@ -31,6 +31,8 @@
 #include <stdio.h>
 #include <signal.h>
 #include <unistd.h>
+#include <pwd.h>
+#include <limits.h>
 
 /* Border/title-bar colors. */
 #define COL_FOCUS_FG   0xff, 0xff, 0xff
@@ -152,6 +154,114 @@ void window_set_geometry(Window *win, int x, int y, int w, int h)
         pty_set_winsize(win->pty, rows, cols);
     }
     win->frame_dirty = true;
+}
+
+/* The login name and hostname are process-stable; resolve each once. */
+static const char *login_name(void)
+{
+    static char name[64];
+    if (!name[0]) {
+        struct passwd *pw = getpwuid(getuid());
+        const char *u = (pw && pw->pw_name) ? pw->pw_name : getenv("USER");
+        snprintf(name, sizeof(name), "%s", (u && *u) ? u : "user");
+    }
+    return name;
+}
+
+static const char *host_name(void)
+{
+    static char host[65];
+    if (!host[0]) {
+        if (gethostname(host, sizeof(host) - 1) != 0 || !host[0]) {
+            snprintf(host, sizeof(host), "localhost");
+        }
+        host[sizeof(host) - 1] = '\0';
+    }
+    return host;
+}
+
+/* Read pid's current working directory into out, abbreviating a leading $HOME
+ * to "~". out is set empty if it can't be read. */
+static void proc_cwd(pid_t pid, char *out, size_t outlen)
+{
+    char link[64];
+    char cwd[PATH_MAX];
+    snprintf(link, sizeof(link), "/proc/%ld/cwd", (long)pid);
+    ssize_t n = readlink(link, cwd, sizeof(cwd) - 1);
+    if (n < 0) {
+        out[0] = '\0';
+        return;
+    }
+    cwd[n] = '\0';
+
+    const char *home = getenv("HOME");
+    if (home && *home) {
+        size_t hl = strlen(home);
+        if (strncmp(cwd, home, hl) == 0 && (cwd[hl] == '/' || cwd[hl] == '\0')) {
+            snprintf(out, outlen, "~%s", cwd + hl);
+            return;
+        }
+    }
+    snprintf(out, outlen, "%s", cwd);
+}
+
+/* Recompute the title from the PTY's foreground process group: the running
+ * program's name, or — when the shell itself is in the foreground (idle at its
+ * prompt) — user@host:cwd. Returns true if the title changed (so callers can
+ * refresh the frame/taskbar). */
+bool window_refresh_title(Window *win)
+{
+    if (win->pty < 0 || win->child <= 0) {
+        return false;
+    }
+
+    /* Foreground process group of the slave terminal; its pgid is the leader's
+     * pid, which equals the shell's pid exactly when no command is running. */
+    pid_t fg = tcgetpgrp(win->pty);
+    if (fg <= 0) {
+        return false; /* can't tell right now; leave the title as-is */
+    }
+
+    /* Assemble into a generous buffer, then copy in with an explicit precision
+     * bound: cwd paths can far exceed VP_TITLE_MAX, and the title is meant to be
+     * truncated to fit the bar anyway. */
+    char next[PATH_MAX + 256];
+    if (fg == win->child) {
+        char loc[PATH_MAX];
+        proc_cwd(win->child, loc, sizeof(loc));
+        if (loc[0]) {
+            snprintf(next, sizeof(next), "%s@%s:%s",
+                     login_name(), host_name(), loc);
+        } else {
+            snprintf(next, sizeof(next), "%s@%s", login_name(), host_name());
+        }
+    } else {
+        char path[64];
+        char comm[64];
+        snprintf(path, sizeof(path), "/proc/%ld/comm", (long)fg);
+        FILE *fp = fopen(path, "r");
+        if (!fp) {
+            return false; /* process vanished between calls; keep current */
+        }
+        char *got = fgets(comm, sizeof(comm), fp);
+        fclose(fp);
+        if (!got) {
+            return false;
+        }
+        comm[strcspn(comm, "\n")] = '\0';
+        if (!comm[0]) {
+            return false;
+        }
+        snprintf(next, sizeof(next), "%s", comm);
+    }
+
+    if (strncmp(next, win->title, sizeof(win->title)) == 0) {
+        return false;
+    }
+    snprintf(win->title, sizeof(win->title), "%.*s",
+             (int)sizeof(win->title) - 1, next);
+    win->frame_dirty = true;
+    return true;
 }
 
 /* Draw the border ring and title bar onto the frame plane. The content plane

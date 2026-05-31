@@ -176,6 +176,7 @@ typedef enum {
     SNAP_TR,
     SNAP_BL,
     SNAP_BR,
+    SNAP_MAX,
 } vp_snapzone;
 
 /* In-app keybinding editor. A modal panel opened from a desktop launcher icon;
@@ -314,6 +315,9 @@ Window *window_create(WM *wm, int x, int y, int w, int h);
 void window_destroy(WM *wm, Window *win);
 void window_set_geometry(Window *win, int x, int y, int w, int h);
 void window_draw_frame(WM *wm, Window *win);
+/* Recompute the title from the PTY's foreground process (running program, or
+ * user@host:cwd for an idle shell). Returns true if the title changed. */
+bool window_refresh_title(Window *win);
 
 /* ------------------------------------------------------------------------- */
 /* wm.c                                                                      */

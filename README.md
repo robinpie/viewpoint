@@ -33,7 +33,7 @@ viewpoint has one global toggle that flips between two modes:
 - INTERPRET (default): window-manager chords (below) are handled by viewpoint; everything else is forwarded to the focused window's program.
 - PASSTHROUGH: every keystroke (except the toggle key) is forwarded to the focused program
 
-The toggle key works in both modes and is never forwarded to a program (except the settings menu). The current mode is shown on on the taskbar (`INTERPT [K]` / `PASSTHRU [P]`).
+The toggle key works in both modes and is never forwarded to a program (except the settings menu). The current mode is shown on on the taskbar (`INTERPRET` / `PASSTHROUGH`).
 
 We try to support all reasonably behaved terminals, but some deliver certain key combinations oddly (or never get them due to the DE capturing them, e.g. `Alt`+`Tab`).
 

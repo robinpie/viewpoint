@@ -352,6 +352,11 @@ void wm_render(WM *wm)
 {
     for (int i = 0; i < wm->nwins; i++) {
         Window *win = wm->wins[i];
+        /* Keep titles in step with the running program / shell cwd. Done for
+         * every window (not just visible ones) so the taskbar stays accurate. */
+        if (window_refresh_title(win)) {
+            wm->taskbar_dirty = true;
+        }
         if (win->minimized) {
             continue;
         }

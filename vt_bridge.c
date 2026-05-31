@@ -64,25 +64,8 @@ static int cb_settermprop(VTermProp prop, VTermValue *val, void *user)
     case VTERM_PROP_CURSORVISIBLE:
         w->cursor_visible = val->boolean != 0;
         break;
-    case VTERM_PROP_TITLE:
-        /* val->string is a fragment; accumulate into the title buffer. The
-         * 'initial' flag marks the start of a fresh string. */
-        if (val->string.initial) {
-            w->title[0] = '\0';
-        }
-        {
-            size_t cur = strlen(w->title);
-            size_t avail = sizeof(w->title) - 1 - cur;
-            size_t n = val->string.len;
-            if (n > avail) {
-                n = avail;
-            }
-            if (n > 0) {
-                memcpy(w->title + cur, val->string.str, n);
-                w->title[cur + n] = '\0';
-            }
-        }
-        break;
+    /* OSC window titles are intentionally ignored: viewpoint derives the title
+     * itself from the PTY's foreground program / shell cwd (window_refresh_title). */
     default:
         break;
     }
