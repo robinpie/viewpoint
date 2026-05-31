@@ -10,9 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Off-screen parking row for minimized windows. */
-#define VP_HIDDEN_Y 100000
-
 void wm_init(WM *wm, struct notcurses *nc)
 {
     memset(wm, 0, sizeof(*wm));

@@ -29,6 +29,14 @@
 
 #define VP_TITLE_MAX 128
 
+/* Off-screen parking row for hidden planes (minimized windows, idle snap
+ * preview). Far below any real screen. */
+#define VP_HIDDEN_Y 100000
+
+/* How close (in cells) the pointer must come to a screen edge during a move
+ * drag to arm an edge/corner snap. */
+#define VP_SNAP_EDGE 2
+
 /* ------------------------------------------------------------------------- */
 /* Global mode                                                               */
 /* ------------------------------------------------------------------------- */
@@ -86,7 +94,13 @@ typedef enum {
     DRAG_NONE = 0,
     DRAG_MOVE,
     DRAG_RESIZE,
+    DRAG_CONTENT, /* button held over a window's content; route to the app */
 } vp_dragkind;
+
+/* Resize-edge bitmask (top edge is the title bar => move, never resize). */
+#define RZ_LEFT   1
+#define RZ_RIGHT  2
+#define RZ_BOTTOM 4
 
 typedef enum {
     SNAP_NONE = 0,
@@ -119,8 +133,10 @@ typedef struct WM {
     /* mouse drag state */
     vp_dragkind drag;
     int drag_win;       /* id of window being dragged */
-    int drag_off_x;     /* grab offset within frame */
+    int drag_off_x;     /* grab offset within frame (move) */
     int drag_off_y;
+    int resize_edge;    /* RZ_* bitmask while DRAG_RESIZE */
+    int drag_ax;        /* anchor: original right column (for left-edge resize) */
     vp_snapzone snap_preview; /* currently-shown snap outline */
     struct ncplane *snap_plane;
 

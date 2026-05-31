@@ -131,90 +131,416 @@ static Window *find_by_id(WM *wm, int id)
     return NULL;
 }
 
-static void begin_drag_or_focus(WM *wm, int y, int x)
+/* ------------------------------------------------------------------------- */
+/* Source-agnostic mouse model. notcurses and GPM both translate their native
+ * events into mouse_event(), so the WM mouse logic lives in exactly one place. */
+/* ------------------------------------------------------------------------- */
+
+typedef enum {
+    MEV_PRESS, MEV_RELEASE, MEV_MOTION, MEV_SCROLL_UP, MEV_SCROLL_DOWN,
+} mev_type;
+
+static VTermModifier to_vmod(unsigned mods)
 {
+    VTermModifier m = VTERM_MOD_NONE;
+    if (mods & NCKEY_MOD_SHIFT) m |= VTERM_MOD_SHIFT;
+    if (mods & NCKEY_MOD_ALT)   m |= VTERM_MOD_ALT;
+    if (mods & NCKEY_MOD_CTRL)  m |= VTERM_MOD_CTRL;
+    return m;
+}
+
+/* ----- title-bar hit testing (must mirror window_draw_frame's layout) ----- */
+
+typedef enum { HIT_MOVE, HIT_MODE, HIT_MIN, HIT_MAX, HIT_CLOSE } titlehit;
+
+static titlehit titlebar_hit(const Window *win, int relx)
+{
+    int w = win->w;
+    if (w >= 6 && relx >= 1 && relx <= 3) {
+        return HIT_MODE; /* the "[K]"/"[P]" indicator */
+    }
+    int btnx = w - 1 - 9; /* "[_][▢][x]" is 9 columns wide */
+    if (btnx > 4) {
+        if (relx >= btnx && relx < btnx + 3)         return HIT_MIN;
+        if (relx >= btnx + 3 && relx < btnx + 6)     return HIT_MAX;
+        if (relx >= btnx + 6 && relx < btnx + 9)     return HIT_CLOSE;
+    }
+    return HIT_MOVE;
+}
+
+/* Which resize edges (if any) the interior border cell (rely,relx) sits on.
+ * rely==0 is the title bar and is handled before this is consulted. */
+static int border_edge(const Window *win, int rely, int relx)
+{
+    int edge = 0;
+    if (relx == 0)            edge |= RZ_LEFT;
+    if (relx == win->w - 1)   edge |= RZ_RIGHT;
+    if (rely == win->h - 1)   edge |= RZ_BOTTOM;
+    return edge;
+}
+
+/* ----- snap preview ----- */
+
+static void snap_geom(WM *wm, vp_snapzone z, int *gx, int *gy, int *gw, int *gh)
+{
+    int W = (int)wm->scr_cols;
+    int H = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
+    int hw = W / 2, hh = H / 2;
+    switch (z) {
+    case SNAP_LEFT:  *gx = 0;  *gy = 0;  *gw = hw;     *gh = H;      break;
+    case SNAP_RIGHT: *gx = hw; *gy = 0;  *gw = W - hw; *gh = H;      break;
+    case SNAP_TL:    *gx = 0;  *gy = 0;  *gw = hw;     *gh = hh;     break;
+    case SNAP_TR:    *gx = hw; *gy = 0;  *gw = W - hw; *gh = hh;     break;
+    case SNAP_BL:    *gx = 0;  *gy = hh; *gw = hw;     *gh = H - hh; break;
+    case SNAP_BR:    *gx = hw; *gy = hh; *gw = W - hw; *gh = H - hh; break;
+    default:         *gx = 0;  *gy = 0;  *gw = W;      *gh = H;      break;
+    }
+}
+
+static vp_snapzone snap_zone_at(WM *wm, int y, int x)
+{
+    int W = (int)wm->scr_cols;
+    int H = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
+    bool L = x <= VP_SNAP_EDGE;
+    bool R = x >= W - 1 - VP_SNAP_EDGE;
+    bool top = y < H / 4;
+    bool bot = y > H - H / 4;
+    if (L) return top ? SNAP_TL : bot ? SNAP_BL : SNAP_LEFT;
+    if (R) return top ? SNAP_TR : bot ? SNAP_BR : SNAP_RIGHT;
+    return SNAP_NONE;
+}
+
+static void snap_hide(WM *wm)
+{
+    if (wm->snap_plane) {
+        ncplane_move_yx(wm->snap_plane, VP_HIDDEN_Y, 0);
+    }
+    wm->snap_preview = SNAP_NONE;
+}
+
+static void snap_show(WM *wm, vp_snapzone z)
+{
+    if (z == SNAP_NONE) {
+        snap_hide(wm);
+        return;
+    }
+    int gx, gy, gw, gh;
+    snap_geom(wm, z, &gx, &gy, &gw, &gh);
+    if (gw < 2 || gh < 2) {
+        return;
+    }
+
+    if (!wm->snap_plane) {
+        ncplane_options o = {0};
+        o.y = gy; o.x = gx;
+        o.rows = (unsigned)gh; o.cols = (unsigned)gw;
+        wm->snap_plane = ncplane_create(wm->std, &o);
+        if (!wm->snap_plane) {
+            return;
+        }
+        uint64_t base = 0; /* transparent interior so windows show through */
+        ncchannels_set_fg_alpha(&base, NCALPHA_TRANSPARENT);
+        ncchannels_set_bg_alpha(&base, NCALPHA_TRANSPARENT);
+        ncplane_set_base(wm->snap_plane, "", 0, base);
+    } else {
+        ncplane_resize_simple(wm->snap_plane, (unsigned)gh, (unsigned)gw);
+        ncplane_move_yx(wm->snap_plane, gy, gx);
+    }
+
+    struct ncplane *p = wm->snap_plane;
+    ncplane_erase(p);
+    ncplane_set_fg_rgb8(p, 0x60, 0xd0, 0xff);
+    ncplane_set_bg_alpha(p, NCALPHA_TRANSPARENT);
+    ncplane_putegc_yx(p, 0, 0, "╔", NULL);
+    ncplane_putegc_yx(p, 0, gw - 1, "╗", NULL);
+    ncplane_putegc_yx(p, gh - 1, 0, "╚", NULL);
+    ncplane_putegc_yx(p, gh - 1, gw - 1, "╝", NULL);
+    for (int c = 1; c < gw - 1; c++) {
+        ncplane_putegc_yx(p, 0, c, "═", NULL);
+        ncplane_putegc_yx(p, gh - 1, c, "═", NULL);
+    }
+    for (int r = 1; r < gh - 1; r++) {
+        ncplane_putegc_yx(p, r, 0, "║", NULL);
+        ncplane_putegc_yx(p, r, gw - 1, "║", NULL);
+    }
+    ncplane_move_top(p);
+    wm->snap_preview = z;
+}
+
+/* ----- content-area forwarding to the inner app ----- */
+
+static void content_forward(Window *win, mev_type t, int btn,
+                            int y, int x, unsigned mods)
+{
+    if (!win) {
+        return;
+    }
+    int crow = y - (win->y + VP_BORDER);
+    int ccol = x - (win->x + VP_BORDER);
+    if (crow < 0 || ccol < 0 || crow >= win->rows || ccol >= win->cols) {
+        return;
+    }
+    VTermModifier vm = to_vmod(mods);
+    /* libvterm only emits a report if the app enabled mouse tracking, so it's
+     * always safe to forward; quiet apps simply ignore it. */
+    vt_mouse_move(win, crow, ccol, vm);
+    switch (t) {
+    case MEV_PRESS:       vt_mouse_button(win, btn, true, vm);  break;
+    case MEV_RELEASE:     vt_mouse_button(win, btn, false, vm); break;
+    case MEV_SCROLL_UP:   vt_mouse_button(win, 4, true, vm);    break;
+    case MEV_SCROLL_DOWN: vt_mouse_button(win, 5, true, vm);    break;
+    case MEV_MOTION:      break; /* the move above is the event */
+    }
+}
+
+/* ----- drag updates ----- */
+
+static void update_drag(WM *wm, int y, int x)
+{
+    Window *win = find_by_id(wm, wm->drag_win);
+    if (!win) {
+        wm->drag = DRAG_NONE;
+        return;
+    }
+
+    if (wm->drag == DRAG_MOVE) {
+        int nx = x - wm->drag_off_x;
+        int ny = y - wm->drag_off_y;
+        if (ny < 0) ny = 0;
+        if (ny > (int)wm->scr_rows - 1) ny = (int)wm->scr_rows - 1;
+        if (nx < -(win->w - 2)) nx = -(win->w - 2);
+        if (nx > (int)wm->scr_cols - 2) nx = (int)wm->scr_cols - 2;
+        window_set_geometry(win, nx, ny, win->w, win->h);
+        /* Arm/disarm the edge snap based on the pointer, and keep the dragged
+         * window above the outline so it stays visible. */
+        snap_show(wm, snap_zone_at(wm, y, x));
+        ncplane_move_family_top(win->frame);
+        if (wm->taskbar) {
+            ncplane_move_top(wm->taskbar);
+        }
+        return;
+    }
+
+    if (wm->drag == DRAG_RESIZE) {
+        int nx = win->x, ny = win->y, nw = win->w, nh = win->h;
+        if (wm->resize_edge & RZ_RIGHT)  nw = x - win->x + 1;
+        if (wm->resize_edge & RZ_BOTTOM) nh = y - win->y + 1;
+        if (wm->resize_edge & RZ_LEFT) {
+            int right = wm->drag_ax;
+            nx = x;
+            nw = right - x + 1;
+            if (nw < VP_MIN_W) { nw = VP_MIN_W; nx = right - nw + 1; }
+            if (nx < 0) { nx = 0; nw = right + 1; }
+        }
+        window_set_geometry(win, nx, ny, nw, nh);
+        return;
+    }
+
+    if (wm->drag == DRAG_CONTENT) {
+        content_forward(win, MEV_MOTION, 1, y, x, 0);
+        return;
+    }
+}
+
+static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
+{
+    if (btn != 1) {
+        content_forward(wm_window_at(wm, y, x), MEV_PRESS, btn, y, x, mods);
+        return;
+    }
+    if (taskbar_click(wm, y, x)) {
+        return;
+    }
     Window *win = wm_window_at(wm, y, x);
     if (!win) {
         return;
     }
     wm_focus_window(wm, win);
 
-    if (y == win->y) {
-        /* Title-bar row: start a move drag, remembering the grab offset. */
+    int rely = y - win->y;
+    int relx = x - win->x;
+
+    if (rely == 0) {
+        switch (titlebar_hit(win, relx)) {
+        case HIT_MODE:  toggle_mode(wm); return;
+        case HIT_MIN:   wm_minimize(wm, win); return;
+        case HIT_MAX:   wm_toggle_maximize(wm, win); return;
+        case HIT_CLOSE: win->dead = true; vp_log("close id=%d (button)\n", win->id); return;
+        case HIT_MOVE:  break;
+        }
+        if (win->maximized) {
+            win->maximized = false;
+        }
         wm->drag = DRAG_MOVE;
         wm->drag_win = win->id;
-        wm->drag_off_x = x - win->x;
-        wm->drag_off_y = y - win->y;
+        wm->drag_off_x = relx;
+        wm->drag_off_y = rely;
+        return;
     }
-    /* Border-drag resize and content forwarding arrive in phase 4. */
+
+    int edge = border_edge(win, rely, relx);
+    if (edge) {
+        if (win->maximized) {
+            win->maximized = false;
+        }
+        wm->drag = DRAG_RESIZE;
+        wm->drag_win = win->id;
+        wm->resize_edge = edge;
+        wm->drag_ax = win->x + win->w - 1; /* anchor right for left-edge drags */
+        return;
+    }
+
+    /* Interior: forward to the app and lock subsequent motion/release to it. */
+    wm->drag = DRAG_CONTENT;
+    wm->drag_win = win->id;
+    content_forward(win, MEV_PRESS, btn, y, x, mods);
 }
 
-static void update_drag(WM *wm, int y, int x)
+static void mouse_release(WM *wm, int btn, int y, int x, unsigned mods)
 {
-    if (wm->drag == DRAG_NONE) {
-        return;
+    if (wm->drag == DRAG_MOVE && wm->snap_preview != SNAP_NONE) {
+        Window *win = find_by_id(wm, wm->drag_win);
+        if (win) {
+            int gx, gy, gw, gh;
+            snap_geom(wm, wm->snap_preview, &gx, &gy, &gw, &gh);
+            win->maximized = false;
+            window_set_geometry(win, gx, gy, gw, gh);
+        }
+    } else if (wm->drag == DRAG_CONTENT) {
+        content_forward(find_by_id(wm, wm->drag_win), MEV_RELEASE, btn, y, x, mods);
     }
-    Window *win = find_by_id(wm, wm->drag_win);
-    if (!win) {
-        wm->drag = DRAG_NONE;
-        return;
-    }
-    if (wm->drag == DRAG_MOVE) {
-        int nx = x - wm->drag_off_x;
-        int ny = y - wm->drag_off_y;
-        /* Keep the title bar reachable: clamp the origin loosely on-screen. */
-        if (ny < 0) ny = 0;
-        if (ny > (int)wm->scr_rows - 1) ny = (int)wm->scr_rows - 1;
-        if (nx < -(win->w - 2)) nx = -(win->w - 2);
-        if (nx > (int)wm->scr_cols - 2) nx = (int)wm->scr_cols - 2;
-        window_set_geometry(win, nx, ny, win->w, win->h);
-    }
+    snap_hide(wm);
+    wm->drag = DRAG_NONE;
+    wm->resize_edge = 0;
 }
 
-void input_route_mouse(WM *wm, const ncinput *ni)
+static void mouse_motion(WM *wm, int y, int x, unsigned mods)
 {
-    int y = ni->y;
-    int x = ni->x;
-
-    if (ni->id == NCKEY_BUTTON1) {
-        if (ni->evtype == NCTYPE_RELEASE) {
-            wm->drag = DRAG_NONE;
-            return;
-        }
-        if (wm->drag != DRAG_NONE) {
-            update_drag(wm, y, x); /* button held & moving */
-            return;
-        }
-        /* Fresh press: taskbar first, then windows. */
-        if (taskbar_click(wm, y, x)) {
-            return;
-        }
-        begin_drag_or_focus(wm, y, x);
-        return;
-    }
-
-    if (ni->id == NCKEY_MOTION) {
+    if (wm->drag != DRAG_NONE) {
         update_drag(wm, y, x);
         return;
     }
+    /* Bare hover: forward to the hovered app (only matters in MOUSE_MOVE mode). */
+    content_forward(wm_window_at(wm, y, x), MEV_MOTION, 1, y, x, mods);
+}
+
+static void mouse_event(WM *wm, mev_type t, int btn, int y, int x, unsigned mods)
+{
+    switch (t) {
+    case MEV_PRESS:       mouse_press(wm, btn, y, x, mods); break;
+    case MEV_RELEASE:     mouse_release(wm, btn, y, x, mods); break;
+    case MEV_MOTION:      mouse_motion(wm, y, x, mods); break;
+    case MEV_SCROLL_UP:
+    case MEV_SCROLL_DOWN:
+        content_forward(wm_window_at(wm, y, x), t, btn, y, x, mods);
+        break;
+    }
+}
+
+/* ----- notcurses mouse source ----- */
+
+void input_route_mouse(WM *wm, const ncinput *ni)
+{
+    int y = ni->y, x = ni->x;
+    unsigned mods = ni->modifiers;
+    vp_log("MOUSE id=%u y=%d x=%d evtype=%d mods=%u drag=%d\n",
+           ni->id, ni->y, ni->x, ni->evtype, ni->modifiers, wm->drag);
+
+    switch (ni->id) {
+    case NCKEY_BUTTON1:
+    case NCKEY_BUTTON2:
+    case NCKEY_BUTTON3: {
+        int btn = (int)(ni->id - NCKEY_BUTTON1) + 1;
+        if (ni->evtype == NCTYPE_RELEASE) {
+            mouse_event(wm, MEV_RELEASE, btn, y, x, mods);
+        } else if (wm->drag != DRAG_NONE || ni->evtype == NCTYPE_REPEAT) {
+            /* notcurses reports a held-button drag as a fresh PRESS, so once a
+             * drag is in progress we treat any non-release button event as
+             * motion (the REPEAT case covers terminals that do distinguish). */
+            mouse_event(wm, MEV_MOTION, btn, y, x, mods);
+        } else {
+            mouse_event(wm, MEV_PRESS, btn, y, x, mods);
+        }
+        break;
+    }
+    case NCKEY_BUTTON4: mouse_event(wm, MEV_SCROLL_UP, 4, y, x, mods); break;
+    case NCKEY_BUTTON5: mouse_event(wm, MEV_SCROLL_DOWN, 5, y, x, mods); break;
+    case NCKEY_MOTION:  mouse_event(wm, MEV_MOTION, 0, y, x, mods); break;
+    default: break;
+    }
 }
 
 /* ------------------------------------------------------------------------- */
-/* GPM (real implementation in phase 4)                                      */
+/* GPM — the bare Linux console mouse. Active only when running on a real VT;  */
+/* Gpm_Open fails (or returns the "under X/term" sentinel) otherwise, in which */
+/* case we fall back to notcurses' own mouse decoding.                         */
 /* ------------------------------------------------------------------------- */
+
+#include <gpm.h>
 
 void gpm_setup(WM *wm)
 {
     wm->gpm_active = false;
     wm->gpm_fd = -1;
+
+    Gpm_Connect conn;
+    conn.eventMask   = (unsigned short)~0;  /* all event types */
+    conn.defaultMask = 0;                   /* don't let anything pass to the VT */
+    conn.minMod      = 0;
+    conn.maxMod      = (unsigned short)~0;
+    conn.pid         = 0;
+    conn.vc          = 0;                    /* current virtual console */
+
+    int fd = Gpm_Open(&conn, 0);
+    if (fd >= 0) {
+        wm->gpm_active = true;
+        wm->gpm_fd = fd;
+        vp_log("gpm: active fd=%d\n", fd);
+    } else {
+        vp_log("gpm: unavailable (%d); using notcurses mouse\n", fd);
+    }
 }
 
 void gpm_pump(WM *wm)
 {
-    (void)wm;
+    if (!wm->gpm_active) {
+        return;
+    }
+    Gpm_Event ev;
+    int r = Gpm_GetEvent(&ev);
+    if (r <= 0) {
+        /* EOF/error: the GPM server went away — drop back to no console mouse. */
+        gpm_teardown(wm);
+        return;
+    }
+
+    int y = ev.y - 1; /* GPM is 1-based */
+    int x = ev.x - 1;
+    if (y < 0) y = 0;
+    if (x < 0) x = 0;
+
+    unsigned mods = 0; /* GPM modifier bits aren't mapped; chords stay keyboard */
+    int btn = (ev.buttons & GPM_B_RIGHT) ? 3 :
+              (ev.buttons & GPM_B_MIDDLE) ? 2 : 1;
+
+    if (ev.wdy > 0) {
+        mouse_event(wm, MEV_SCROLL_UP, 4, y, x, mods);
+    } else if (ev.wdy < 0) {
+        mouse_event(wm, MEV_SCROLL_DOWN, 5, y, x, mods);
+    } else if (ev.type & GPM_DOWN) {
+        mouse_event(wm, MEV_PRESS, btn, y, x, mods);
+    } else if (ev.type & GPM_UP) {
+        mouse_event(wm, MEV_RELEASE, btn, y, x, mods);
+    } else if (ev.type & (GPM_MOVE | GPM_DRAG)) {
+        mouse_event(wm, MEV_MOTION, btn, y, x, mods);
+    }
 }
 
 void gpm_teardown(WM *wm)
 {
-    (void)wm;
+    if (wm->gpm_active) {
+        Gpm_Close();
+        wm->gpm_active = false;
+        wm->gpm_fd = -1;
+    }
 }
