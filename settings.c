@@ -35,7 +35,7 @@
 
 /* Desktop launcher: a roomy icon "tile" (a big gear above a label), top-left.
  * It lives on the desktop, below the windows, so windows can cover it. */
-#define ICON_Y 0
+#define ICON_Y 1
 #define ICON_X 1
 #define ICON_W 12
 #define ICON_H 4

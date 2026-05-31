@@ -1,11 +1,8 @@
-# viewpoint
+viewpoint is a terminal multiplexer with a desktop-window-manager metaphor for Linux.
 
-A terminal multiplexer with a desktop-window-manager metaphor for Linux.
-
-`viewpoint` presents floating, overlapping, WIMPy windows on your terminal. Each window runs its own shell (or any program) in a dedicated PTY, complete with the amazing 1990s innovations in window chrome: draggable borders, a title bar with minimize/maximize/close buttons, a desktop background, and a taskbar. You move, resize, raise, snap, minimize and maximize windows with the mouse or keyboard, similarly as on a graphical desktop.
+viewpoint presents floating windows in a WIMPy interface on your terminal. Each window runs its own shell (or any program) in a dedicated PTY, but with the amazing 1990s innovations in window chrome: draggable borders, a title bar with minimize/maximize/close buttons, a desktop background, and a taskbar. You move, resize, raise, snap, minimize and maximize windows with the mouse or keyboard, similarly as on a graphical desktop.
 
 ---
-
 
 ## Build and dependencies
 
@@ -14,13 +11,7 @@ make
 ```
 You need the development headers and libraries for notcurses, libvterm and GPM, plus a C toolchain with `forkpty` (from libutil, part of glibc).
 
-On Arch Linux:
-
-```sh
-sudo pacman -S notcurses libvterm gpm base-devel
-```
-
-(`base-devel` provides `gcc`, `make` and `pkg-config`; `libutil`/`forkpty` ship with glibc.)
+On Arch Linux: `sudo pacman -S notcurses libvterm gpm base-devel`
 
 notcurses and libvterm are located via `pkg-config`. GPM has no `.pc` file, so it is linked directly with `-lgpm`.
 
@@ -29,61 +20,56 @@ notcurses and libvterm are located via `pkg-config`. GPM has no `.pc` file, so i
 ```sh
 ./viewpoint
 ```
-
-It starts with two overlapping shell windows. Closing the last window exits cleanly; you can also just close every window.
-
 viewpoint expects to fully own the terminal. Running viewpoint inside another multiplexer will not work and is not supported. Running another multiplexer inside viewpoint *may* work but is not supported.
 
 ## Usage
 
-### Modes: INTERPRET / PASSTHROUGH
+Closing all windows exits viewpoint.
+
+### Modes
 
 viewpoint has one global toggle that flips between two modes:
 
 - INTERPRET (default): window-manager chords (below) are handled by viewpoint; everything else is forwarded to the focused window's program.
 - PASSTHROUGH: every keystroke (except the toggle key) is forwarded to the focused program
 
-The toggle key, `F12`, works in both modes and is never forwarded to a program. The current mode is shown both on the taskbar (`INTERPT [K]` / `PASSTHRU [P]`) and on each window's title bar (`[K]` / `[P]`); clicking either indicator toggles the mode too.
+The toggle key works in both modes and is never forwarded to a program (except the settings menu). The current mode is shown on on the taskbar (`INTERPT [K]` / `PASSTHRU [P]`).
 
 We try to support all reasonably behaved terminals, but some deliver certain key combinations oddly (or never get them due to the DE capturing them, e.g. `Alt`+`Tab`).
 
 ### Keymap
 
-All chords below are active in INTERPRET mode (the toggle itself works in both modes). 
+These are the default chords active in INTERPRET mode.
 
-| Key                       | Action                                   |
-|---------------------------|------------------------------------------|
-| `F12`                     | Toggle INTERPRET ↔ PASSTHROUGH mode      |
-| `Alt`+`Tab`               | Focus next window                        |
-| `Alt`+`Shift`+`Tab`       | Focus previous window                    |
-| `Alt`+`n`                 | New window                               |
-| `Alt`+`F4`                | Close focused window                     |
-| `Alt`+`m`                 | Minimize focused window                  |
-| `Alt`+`x`                 | Toggle maximize of focused window        |
-| `Alt`+`1` … `Alt`+`9`     | Focus / restore window in taskbar slot N |
-| `Alt`+`←`/`→`/`↑`/`↓`     | Move focused window                      |
-| `Alt`+`Shift`+`←`/`→`/`↑`/`↓` | Resize focused window               |
+| Key                           | Action                                   |
+|-------------------------------|------------------------------------------|
+| `F12`                         | Toggle INTERPRET ↔ PASSTHROUGH mode      |
+| `Alt`+`Tab`                   | Focus next window                        |
+| `Alt`+`Shift`+`Tab`           | Focus previous window                    |
+| `Alt`+`n`                     | New window                               |
+| `Alt`+`F4`                    | Close focused window                     |
+| `Alt`+`m`                     | Minimize focused window                  |
+| `Alt`+`x`                     | Toggle maximize of focused window        |
+| `Alt`+`1` … `Alt`+`9`         | Focus / restore window in taskbar slot N |
+| `Alt`+`←`/`→`/`↑`/`↓`         | Move focused window                      |
+| `Alt`+`Shift`+`←`/`→`/`↑`/`↓` | Resize focused window                    |
 
 ### Mouse
 
 | Action                                        | Effect                                   |
 |-----------------------------------------------|------------------------------------------|
 | Click an unfocused window                     | Focus / raise it                         |
-| Click the title-bar `[K]`/`[P]` indicator     | Toggle global mode                       |
 | Click `[_]` / `[▢]` / `[x]` title buttons     | Minimize / maximize / close              |
 | Drag the title bar                            | Move the window                          |
 | Drag a window border or corner                | Resize the window                        |
 | Drag the title bar to a screen edge / corner  | Snap to half / quarter (outline preview shown; applied on release) |
 | Click a taskbar slot                          | Focus, or restore if minimized           |
 | Click the taskbar mode region                 | Toggle global mode                       |
-| Click the `⚙ Settings` icon (desktop top-left)| Open the keybinding editor               |
+| Click the `⚙ Settings` icon (desktop top-left)| Open the settings menu                   |
 
 ## Configuration
 
-viewpoint reads an optional config file from
-`$XDG_CONFIG_HOME/viewpoint/viewpoint.conf` (falling back to
-`~/.config/viewpoint/viewpoint.conf`). If it doesn't exist, the built-in
-defaults are used.
+viewpoint reads an optional config file from `$XDG_CONFIG_HOME/viewpoint/viewpoint.conf`.
 
 ### In-app keybinding editor
 
@@ -92,17 +78,13 @@ desktop. Clicking it opens a modal editor listing every action with its current
 chord (and the mode-toggle key):
 
 - `↑`/`↓` (or click a row) to select an action
-- `Enter` (or click the row again) then press the chord you want — it binds live
+- `Enter` (or click the row again) then press the chord you want. Changes take effect instantly.
 - `D` / `Delete` to unbind the selected action
 - `S` to save now, `Esc` (or click outside the panel) to close
 
-If a change you make in the editor is governed by your manual config section,
-the status line warns you (e.g. *"…your manual config overrides it on
-restart"*) — since the manual section wins, that change won't survive a restart
-until you edit the manual section yourself.
+If a change you make in the editor is governed by your manual config section, the status line warns you, but the manual section wins, so that change won't survive a restart.
 
-Closing the editor writes your bindings to the config file, so they persist
-across restarts.
+### Configuration file
 
 The config file has two parts:
 
@@ -110,22 +92,14 @@ The config file has two parts:
 # viewpoint config
 
 # in-app/automatically set configuration:
-# ...the editor manages this section; don't edit it by hand...
+# ...the editor manages this section, don't edit it by hand...
 # manual configuration:
 # ...your hand-written settings live here and are preserved verbatim...
 ```
 
-The in-app editor only ever rewrites the upper (autogenerated) section; your
-hand-written "manual" section below it (comments included) is left untouched.
-Because later lines win, **your manual section overrides the autogenerated one**
-— so a binding you set by hand always takes precedence, and to change it you
-edit the manual section rather than fighting the editor.
-
 ### Editing the file by hand
 
-It is a simple line-oriented `key = value` file; `#` starts a comment and blank
-lines are ignored. The keybindings above are just the defaults — you can rebind
-them:
+It is a line-oriented `key = value` file; `#` starts a comment and blank lines are ignored. 
 
 ```conf
 # Add or change a chord:  bind = <chord> <action>
@@ -139,61 +113,9 @@ unbind = alt+f4
 toggle = f12
 ```
 
-A **chord** is an optional `alt+`/`shift+`/`ctrl+` modifier prefix followed by a
-key: a single character (`n`, `x`), a function key (`f1`…`f60`), or a named key
-(`tab`, `enter`, `esc`, `space`, `left`/`right`/`up`/`down`, `home`, `end`,
-`pgup`, `pgdn`, `delete`, `insert`, `backspace`).
+A chord is an optional `alt+`/`shift+`/`ctrl+` modifier prefix followed by a key: a single character (`n`, `x`), a function key (`f1`…`f60`), or a named key (`tab`, `enter`, `esc`, `space`, `left`/`right`/`up`/`down`, `home`, `end`, `pgup`, `pgdn`, `delete`, `insert`, `backspace`).
 
-The available **actions** are: `focus_next`, `focus_prev`, `new`, `close`,
-`minimize`, `maximize`, `move_left`/`move_right`/`move_up`/`move_down`,
-`resize_left`/`resize_right`/`resize_up`/`resize_down`, and `slot1`…`slot9`
-(focus/restore the window in taskbar slot N).
-
-Set `VP_DEBUG` to a file path to see parse errors and the resolved config path.
-
-## Development notes
-
-Written in C for Linux.
-
-It is built on three libraries:
-
-- [notcurses](https://github.com/dankamongmen/notcurses) for rendering and compositing. The stack of `ncplane`s is the window stack; z-order is the source of truth for which window is on top.
-- [libvterm](https://www.leonerd.org.uk/code/libvterm/) for terminal emulation. Every window has its own `VTerm`. We stay out of the weeds of manual VT parsing.
-- [GPM](https://www.nico.schottelius.org/software/gpm/) for mouse support on the bare Linux console. On a graphical terminal emulator, notcurses'own mouse decoding is used instead.
-
-## Architecture
-
-| File          | Responsibility                                                        |
-|---------------|-----------------------------------------------------------------------|
-| `main.c`      | Init + the single `poll(2)` event loop; window teardown/reaping        |
-| `pty.c`       | `forkpty()` a child shell; window-size ioctls                          |
-| `vt_bridge.c` | libvterm ↔ notcurses bridge: feed PTY bytes, render the grid, forward keys/mouse |
-| `window.c`    | Per-window lifecycle and frame (border + title bar) drawing            |
-| `wm.c`        | Window list, focus, z-order, layout (move/resize/min/max), render pass |
-| `input.c`     | Keyboard chords vs. forwarding; the unified mouse model; snapping; GPM; keymap defaults + parsing |
-| `taskbar.c`   | Bottom taskbar: per-window slots + mode indicator                      |
-| `config.c`    | Load/save the config file (`viewpoint.conf`); the customizable keymap   |
-| `settings.c`  | Desktop launcher icon + the modal in-app keybinding editor             |
-| `viewpoint.h` | Shared declarations and tunables                                       |
-
-### Debug log
-
-Set `VP_DEBUG` to a file path to capture an internal event trace (focus changes, geometry, mode toggles, spawns/closes):
-
-```sh
-VP_DEBUG=/tmp/viewpoint.log ./viewpoint
-```
-
-### Miscellaneous
-
-The *default* toggle key is `#define VP_TOGGLE_KEY` in `viewpoint.h`, and the default keymap is a single table (`g_default_keymap[]` in `input.c`). At startup these seed `WM.config`, which the config file and the in-app editor then edit — so the live keymap is data in `WM.config`, not the table itself.
-
-On the bare Linux console, mouse input comes from `gpm`. In a graphical terminal, notcurses decodes the mouse. Only one source is used at a time.
-
-### Todo
-
-- Fix numerous bugs and UI polish issues
-- Far in the future, but keep abstractions clean for: inner-application sixel passthrough, viewpoint-native sixel widgets, and `NCBLIT_PIXEL` graphics.
+The available actions are: `focus_next`, `focus_prev`, `new`, `close`, `minimize`, `maximize`, `move_left`/`move_right`/`move_up`/`move_down`, `resize_left`/`resize_right`/`resize_up`/`resize_down`, and `slot1`…`slot9` (focus/restore the window in taskbar slot N).
 
 ---
 
