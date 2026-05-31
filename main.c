@@ -153,6 +153,7 @@ int main(void)
     wm_init(&wm, nc);
     gpm_setup(&wm);
     taskbar_create(&wm);
+    settings_init(&wm); /* desktop launcher icon, below the windows */
 
     /* Start with two overlapping shells. */
     wm_spawn_window(&wm);
@@ -269,6 +270,8 @@ int main(void)
     }
     free(wm.wins);
     free(pfds);
+    settings_teardown(&wm);
+    config_free(&wm.config);
     gpm_teardown(&wm);
     /* Undo the motion-tracking modes we re-asserted (notcurses_stop resets the
      * modes it set itself, but not our extra 1002). */

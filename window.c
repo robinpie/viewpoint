@@ -184,19 +184,12 @@ void window_draw_frame(WM *wm, Window *win)
     ncplane_putegc_yx(f, h - 1, w - 1, "┘", NULL);      /* ┘ */
 
     /* Title bar = top row. Layout:
-     *   ┌ [P]/[K] title ........... [_][▢][x] ┐
-     * The mode toggle indicator reflects the GLOBAL mode (clickable later). */
+     *   ┌ title ........... [_][▢][x] ┐ */
     ncplane_putegc_yx(f, 0, 0, "┌", NULL);              /* ┌ */
     for (int col = 1; col < w - 1; col++) {
         ncplane_putegc_yx(f, 0, col, "─", NULL);        /* ─ fill */
     }
     ncplane_putegc_yx(f, 0, w - 1, "┐", NULL);          /* ┐ */
-
-    /* Mode indicator just inside the left corner. */
-    const char *modi = (wm->mode == MODE_PASSTHROUGH) ? "[P]" : "[K]";
-    if (w >= 6) {
-        ncplane_putstr_yx(f, 0, 1, modi);
-    }
 
     /* Window buttons near the right corner: minimize, maximize, close. */
     const char *btns = "[_][▢][x]"; /* [_][▢][x] : 9 columns wide */
@@ -208,8 +201,8 @@ void window_draw_frame(WM *wm, Window *win)
         btnx = w; /* no room; title may use full width */
     }
 
-    /* Title text between the mode indicator and the buttons. */
-    int tstart = (w >= 6) ? 5 : 1; /* after "[K] " */
+    /* Title text between the left corner and the buttons. */
+    int tstart = 1; /* just inside the ┌ corner */
     int tend = (btnx < w) ? btnx - 1 : w - 1;
     int avail = tend - tstart;
     if (avail > 0) {

@@ -26,9 +26,17 @@
 #define _GNU_SOURCE
 #include "viewpoint.h"
 
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
 /* Step sizes for keyboard move/resize chords. */
 #define MOVE_STEP   2
 #define RESIZE_STEP 1
+
+/* Effective modifier mask of a key event (defined below, used by the keymap
+ * helpers above it). */
+static unsigned eff_mods(const ncinput *ni);
 
 static void toggle_mode(WM *wm)
 {
@@ -40,25 +48,13 @@ static void toggle_mode(WM *wm)
     vp_log("mode=%s\n", wm->mode == MODE_PASSTHROUGH ? "PASSTHRU" : "INTERPRET");
 }
 
-/* The bare-chord action set. */
-typedef enum {
-    ACT_FOCUS_NEXT, ACT_FOCUS_PREV, ACT_CLOSE, ACT_NEW, ACT_MIN, ACT_MAXTOGGLE,
-    ACT_MOVE_L, ACT_MOVE_R, ACT_MOVE_U, ACT_MOVE_D,
-    ACT_RESIZE_L, ACT_RESIZE_R, ACT_RESIZE_U, ACT_RESIZE_D,
-} vp_action;
-
-/* The keymap, in one editable table. 'mods' is matched exactly against the
- * SHIFT/ALT/CTRL bits (lock bits are ignored). */
-typedef struct {
-    uint32_t id;
-    unsigned mods;
-    vp_action act;
-} keychord;
-
+/* The built-in keymap, in one editable table — these are the *defaults*; the
+ * config file (bind/unbind lines) edits the live copy in WM.config. 'mods' is
+ * matched exactly against the SHIFT/ALT/CTRL bits (lock bits are ignored). */
 #define A  NCKEY_MOD_ALT
 #define AS (NCKEY_MOD_ALT | NCKEY_MOD_SHIFT)
 
-static const keychord g_keymap[] = {
+static const keychord g_default_keymap[] = {
     { NCKEY_TAB,   A,  ACT_FOCUS_NEXT },
     { NCKEY_TAB,   AS, ACT_FOCUS_PREV },
     { NCKEY_F04,   A,  ACT_CLOSE },
@@ -73,10 +69,386 @@ static const keychord g_keymap[] = {
     { NCKEY_RIGHT, AS, ACT_RESIZE_R },
     { NCKEY_UP,    AS, ACT_RESIZE_U },
     { NCKEY_DOWN,  AS, ACT_RESIZE_D },
+    { '1', A, ACT_SLOT_1 }, { '2', A, ACT_SLOT_2 }, { '3', A, ACT_SLOT_3 },
+    { '4', A, ACT_SLOT_4 }, { '5', A, ACT_SLOT_5 }, { '6', A, ACT_SLOT_6 },
+    { '7', A, ACT_SLOT_7 }, { '8', A, ACT_SLOT_8 }, { '9', A, ACT_SLOT_9 },
 };
 
 #undef A
 #undef AS
+
+/* ----- config keymap parsing & construction ----------------------------- */
+
+/* Action names accepted in `bind` lines, paired with a human label (shown in
+ * the in-app settings editor) and the enum. Row order here is the order the
+ * settings editor lists actions in. */
+static const struct { const char *name; const char *label; vp_action act; } g_action_names[] = {
+    { "focus_next",   "Focus next window",     ACT_FOCUS_NEXT },
+    { "focus_prev",   "Focus previous window", ACT_FOCUS_PREV },
+    { "new",          "New window",            ACT_NEW },
+    { "close",        "Close window",          ACT_CLOSE },
+    { "minimize",     "Minimize window",       ACT_MIN },
+    { "maximize",     "Maximize / restore",    ACT_MAXTOGGLE },
+    { "move_left",    "Move window left",      ACT_MOVE_L },
+    { "move_right",   "Move window right",     ACT_MOVE_R },
+    { "move_up",      "Move window up",        ACT_MOVE_U },
+    { "move_down",    "Move window down",      ACT_MOVE_D },
+    { "resize_left",  "Resize window left",    ACT_RESIZE_L },
+    { "resize_right", "Resize window right",   ACT_RESIZE_R },
+    { "resize_up",    "Resize window up",      ACT_RESIZE_U },
+    { "resize_down",  "Resize window down",    ACT_RESIZE_D },
+    { "slot1", "Focus taskbar slot 1", ACT_SLOT_1 },
+    { "slot2", "Focus taskbar slot 2", ACT_SLOT_2 },
+    { "slot3", "Focus taskbar slot 3", ACT_SLOT_3 },
+    { "slot4", "Focus taskbar slot 4", ACT_SLOT_4 },
+    { "slot5", "Focus taskbar slot 5", ACT_SLOT_5 },
+    { "slot6", "Focus taskbar slot 6", ACT_SLOT_6 },
+    { "slot7", "Focus taskbar slot 7", ACT_SLOT_7 },
+    { "slot8", "Focus taskbar slot 8", ACT_SLOT_8 },
+    { "slot9", "Focus taskbar slot 9", ACT_SLOT_9 },
+};
+
+#define ACTION_COUNT ((int)(sizeof(g_action_names) / sizeof(g_action_names[0])))
+
+/* Named non-printable keys accepted in chord strings. Single printable
+ * characters (e.g. "n", "x", "/") and function keys ("f1".."f60") are handled
+ * separately in key_from_name(). */
+static const struct { const char *name; uint32_t id; } g_key_names[] = {
+    { "tab", NCKEY_TAB },     { "enter", NCKEY_ENTER }, { "return", NCKEY_ENTER },
+    { "esc", NCKEY_ESC },     { "escape", NCKEY_ESC },  { "space", ' ' },
+    { "backspace", NCKEY_BACKSPACE },
+    { "delete", NCKEY_DEL },  { "del", NCKEY_DEL },
+    { "insert", NCKEY_INS },  { "ins", NCKEY_INS },
+    { "home", NCKEY_HOME },   { "end", NCKEY_END },
+    { "pgup", NCKEY_PGUP },   { "pageup", NCKEY_PGUP },
+    { "pgdn", NCKEY_PGDOWN }, { "pagedown", NCKEY_PGDOWN },
+    { "up", NCKEY_UP },       { "down", NCKEY_DOWN },
+    { "left", NCKEY_LEFT },   { "right", NCKEY_RIGHT },
+};
+
+static bool ci_eq(const char *a, const char *b)
+{
+    for (; *a && *b; a++, b++) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+            return false;
+        }
+    }
+    return *a == *b;
+}
+
+static bool parse_action(const char *name, vp_action *out)
+{
+    for (size_t i = 0; i < sizeof(g_action_names) / sizeof(g_action_names[0]); i++) {
+        if (ci_eq(name, g_action_names[i].name)) {
+            *out = g_action_names[i].act;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool key_from_name(const char *name, uint32_t *id)
+{
+    if (name[0] == '\0') {
+        return false;
+    }
+    /* single printable character: use its codepoint (lowercased if a letter, so
+     * the SHIFT modifier alone expresses the upper case). */
+    if (name[1] == '\0') {
+        unsigned char c = (unsigned char)name[0];
+        *id = isalpha(c) ? (uint32_t)tolower(c) : (uint32_t)c;
+        return true;
+    }
+    /* function keys f1..f60 */
+    if ((name[0] == 'f' || name[0] == 'F') && isdigit((unsigned char)name[1])) {
+        char *end = NULL;
+        long n = strtol(name + 1, &end, 10);
+        if (end && *end == '\0' && n >= 1 && n <= 60) {
+            *id = (uint32_t)(NCKEY_F01 + (n - 1));
+            return true;
+        }
+    }
+    for (size_t i = 0; i < sizeof(g_key_names) / sizeof(g_key_names[0]); i++) {
+        if (ci_eq(name, g_key_names[i].name)) {
+            *id = g_key_names[i].id;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Parse "alt+shift+left" into an id + modifier mask. The last '+'-separated
+ * token is the key; the earlier ones are modifiers. */
+static bool parse_chord(const char *str, uint32_t *id_out, unsigned *mods_out)
+{
+    char buf[64];
+    if (strlen(str) >= sizeof(buf)) {
+        return false;
+    }
+    strcpy(buf, str);
+
+    unsigned mods = 0;
+    char *tok = buf;
+    for (;;) {
+        char *plus = strchr(tok, '+');
+        if (!plus) {
+            break; /* tok is the final segment: the key itself */
+        }
+        *plus = '\0';
+        if (ci_eq(tok, "alt") || ci_eq(tok, "meta")) {
+            mods |= NCKEY_MOD_ALT;
+        } else if (ci_eq(tok, "shift")) {
+            mods |= NCKEY_MOD_SHIFT;
+        } else if (ci_eq(tok, "ctrl") || ci_eq(tok, "control") || ci_eq(tok, "ctl")) {
+            mods |= NCKEY_MOD_CTRL;
+        } else {
+            return false; /* unknown modifier */
+        }
+        tok = plus + 1;
+    }
+
+    uint32_t id;
+    if (!key_from_name(tok, &id)) {
+        return false;
+    }
+    *id_out = id;
+    *mods_out = mods;
+    return true;
+}
+
+/* Add or override (id,mods)→act in cfg->keymap, growing the array as needed. */
+static void keymap_put(VpConfig *cfg, uint32_t id, unsigned mods, vp_action act)
+{
+    for (int i = 0; i < cfg->nkeys; i++) {
+        if (cfg->keymap[i].id == id && cfg->keymap[i].mods == mods) {
+            cfg->keymap[i].act = act;
+            return;
+        }
+    }
+    if (cfg->nkeys == cfg->keycap) {
+        int ncap = cfg->keycap ? cfg->keycap * 2 : 16;
+        keychord *n = realloc(cfg->keymap, (size_t)ncap * sizeof(*n));
+        if (!n) {
+            return;
+        }
+        cfg->keymap = n;
+        cfg->keycap = ncap;
+    }
+    cfg->keymap[cfg->nkeys++] = (keychord){ id, mods, act };
+}
+
+void keymap_load_defaults(VpConfig *cfg)
+{
+    int n = (int)(sizeof(g_default_keymap) / sizeof(g_default_keymap[0]));
+    cfg->keymap = malloc((size_t)n * sizeof(keychord));
+    if (cfg->keymap) {
+        memcpy(cfg->keymap, g_default_keymap, (size_t)n * sizeof(keychord));
+        cfg->nkeys = n;
+        cfg->keycap = n;
+    } else {
+        cfg->nkeys = 0;
+        cfg->keycap = 0;
+    }
+    cfg->toggle_key = VP_TOGGLE_KEY;
+}
+
+bool keymap_bind(VpConfig *cfg, const char *chord, const char *action)
+{
+    uint32_t id;
+    unsigned mods;
+    vp_action act;
+    if (!parse_chord(chord, &id, &mods)) {
+        vp_log("config: bad key chord '%s'\n", chord);
+        return false;
+    }
+    if (!parse_action(action, &act)) {
+        vp_log("config: unknown action '%s'\n", action);
+        return false;
+    }
+    keymap_put(cfg, id, mods, act);
+    return true;
+}
+
+bool keymap_unbind(VpConfig *cfg, const char *chord)
+{
+    /* "unbind = all" clears the whole table — used by the in-app save so the
+     * written file is a complete snapshot rather than an overlay on defaults. */
+    if (ci_eq(chord, "all") || strcmp(chord, "*") == 0) {
+        cfg->nkeys = 0;
+        return true;
+    }
+
+    uint32_t id;
+    unsigned mods;
+    if (!parse_chord(chord, &id, &mods)) {
+        vp_log("config: bad key chord '%s'\n", chord);
+        return false;
+    }
+    for (int i = 0; i < cfg->nkeys; i++) {
+        if (cfg->keymap[i].id == id && cfg->keymap[i].mods == mods) {
+            for (int j = i; j < cfg->nkeys - 1; j++) {
+                cfg->keymap[j] = cfg->keymap[j + 1];
+            }
+            cfg->nkeys--;
+            return true;
+        }
+    }
+    return true; /* nothing bound to that chord — not an error */
+}
+
+bool keymap_set_toggle(VpConfig *cfg, const char *chord)
+{
+    uint32_t id;
+    unsigned mods;
+    if (!parse_chord(chord, &id, &mods)) {
+        vp_log("config: bad toggle chord '%s'\n", chord);
+        return false;
+    }
+    cfg->toggle_key = id; /* modifiers are ignored for the toggle */
+    return true;
+}
+
+/* ----- queries used by the in-app settings editor & the config writer ---- */
+
+int keymap_action_count(void)
+{
+    return ACTION_COUNT;
+}
+
+bool keymap_action_info(int row, vp_action *act, const char **label)
+{
+    if (row < 0 || row >= ACTION_COUNT) {
+        return false;
+    }
+    if (act)   *act = g_action_names[row].act;
+    if (label) *label = g_action_names[row].label;
+    return true;
+}
+
+const char *keymap_action_name(vp_action act)
+{
+    for (int i = 0; i < ACTION_COUNT; i++) {
+        if (g_action_names[i].act == act) {
+            return g_action_names[i].name;
+        }
+    }
+    return "?";
+}
+
+/* Render (id,mods) back into a "alt+shift+left"-style string. */
+void keymap_format_chord(uint32_t id, unsigned mods, char *buf, size_t n)
+{
+    if (n == 0) {
+        return;
+    }
+    buf[0] = '\0';
+    size_t len = 0;
+    #define APPEND(s) do { \
+        int _w = snprintf(buf + len, n - len, "%s", (s)); \
+        if (_w > 0) { len += (size_t)_w; if (len >= n) len = n - 1; } \
+    } while (0)
+
+    if (mods & NCKEY_MOD_CTRL)  APPEND("ctrl+");
+    if (mods & NCKEY_MOD_ALT)   APPEND("alt+");
+    if (mods & NCKEY_MOD_SHIFT) APPEND("shift+");
+
+    /* function keys */
+    if (id >= NCKEY_F01 && id <= NCKEY_F60) {
+        char fb[8];
+        snprintf(fb, sizeof(fb), "f%u", (unsigned)(id - NCKEY_F01 + 1));
+        APPEND(fb);
+    } else {
+        const char *named = NULL;
+        for (size_t i = 0; i < sizeof(g_key_names) / sizeof(g_key_names[0]); i++) {
+            if (g_key_names[i].id == id) { named = g_key_names[i].name; break; }
+        }
+        if (named) {
+            APPEND(named);
+        } else if (id >= 0x21 && id < 0x7f) { /* printable ASCII */
+            char cb[2] = { (char)id, '\0' };
+            APPEND(cb);
+        } else {
+            char hb[16];
+            snprintf(hb, sizeof(hb), "0x%x", id);
+            APPEND(hb);
+        }
+    }
+    #undef APPEND
+}
+
+bool keymap_chord_for_action(const VpConfig *cfg, vp_action act, char *buf, size_t n)
+{
+    for (int i = 0; i < cfg->nkeys; i++) {
+        if (cfg->keymap[i].act == act) {
+            keymap_format_chord(cfg->keymap[i].id, cfg->keymap[i].mods, buf, n);
+            return true;
+        }
+    }
+    if (n) {
+        snprintf(buf, n, "%s", "(unbound)");
+    }
+    return false;
+}
+
+/* Translate a live keypress into a chord, rejecting bare modifier/lock keys and
+ * mouse events. Used by the settings editor when capturing a new binding. */
+bool keymap_chord_from_input(const ncinput *ni, uint32_t *id_out, unsigned *mods_out)
+{
+    uint32_t id = ni->id;
+    if (id == 0 || nckey_mouse_p(id)) {
+        return false;
+    }
+    switch (id) {
+    case NCKEY_LSHIFT: case NCKEY_RSHIFT:
+    case NCKEY_LCTRL:  case NCKEY_RCTRL:
+    case NCKEY_LALT:   case NCKEY_RALT:
+    case NCKEY_LSUPER: case NCKEY_RSUPER:
+    case NCKEY_LHYPER: case NCKEY_RHYPER:
+    case NCKEY_LMETA:  case NCKEY_RMETA:
+    case NCKEY_CAPS_LOCK: case NCKEY_NUM_LOCK: case NCKEY_SCROLL_LOCK:
+        return false;
+    default:
+        break;
+    }
+    if (id < 0x80 && isalpha((int)id)) {
+        id = (uint32_t)tolower((int)id);
+    }
+    *id_out = id;
+    *mods_out = eff_mods(ni);
+    return true;
+}
+
+/* Make `act` reachable solely via (id,mods): drop any other chords currently
+ * bound to it, then set this chord (overriding whatever it pointed at before). */
+void keymap_rebind_action(VpConfig *cfg, vp_action act, uint32_t id, unsigned mods)
+{
+    for (int i = 0; i < cfg->nkeys; ) {
+        if (cfg->keymap[i].act == act) {
+            for (int j = i; j < cfg->nkeys - 1; j++) {
+                cfg->keymap[j] = cfg->keymap[j + 1];
+            }
+            cfg->nkeys--;
+        } else {
+            i++;
+        }
+    }
+    keymap_put(cfg, id, mods, act);
+}
+
+/* Remove every chord bound to `act` (leaving it unbound). */
+void keymap_unbind_action(VpConfig *cfg, vp_action act)
+{
+    for (int i = 0; i < cfg->nkeys; ) {
+        if (cfg->keymap[i].act == act) {
+            for (int j = i; j < cfg->nkeys - 1; j++) {
+                cfg->keymap[j] = cfg->keymap[j + 1];
+            }
+            cfg->nkeys--;
+        } else {
+            i++;
+        }
+    }
+}
 
 /* Effective modifier mask. We use the classical legacy input path: notcurses
  * delivers modifiers through the deprecated ni->alt/shift/ctrl bools — e.g.
@@ -89,6 +461,20 @@ static unsigned eff_mods(const ncinput *ni)
     if (ni->shift) mods |= NCKEY_MOD_SHIFT;
     if (ni->ctrl)  mods |= NCKEY_MOD_CTRL;
     return mods;
+}
+
+/* Focus, or restore if minimized, the window in taskbar slot N (0-based). */
+static void focus_slot(WM *wm, int slot)
+{
+    if (slot < 0 || slot >= wm->nwins) {
+        return;
+    }
+    Window *win = wm->wins[slot];
+    if (win->minimized) {
+        wm_restore(wm, win);
+    } else {
+        wm_focus_window(wm, win);
+    }
 }
 
 static void do_action(WM *wm, vp_action act)
@@ -108,13 +494,23 @@ static void do_action(WM *wm, vp_action act)
     case ACT_RESIZE_R:   wm_resize_focused(wm, +RESIZE_STEP, 0); break;
     case ACT_RESIZE_U:   wm_resize_focused(wm, 0, -RESIZE_STEP); break;
     case ACT_RESIZE_D:   wm_resize_focused(wm, 0, +RESIZE_STEP); break;
+    case ACT_SLOT_1: case ACT_SLOT_2: case ACT_SLOT_3:
+    case ACT_SLOT_4: case ACT_SLOT_5: case ACT_SLOT_6:
+    case ACT_SLOT_7: case ACT_SLOT_8: case ACT_SLOT_9:
+        focus_slot(wm, (int)(act - ACT_SLOT_1)); break;
     }
 }
 
 bool input_handle_key(WM *wm, const ncinput *ni)
 {
+    /* The settings editor is modal: while open it swallows every key. */
+    if (wm->settings.open) {
+        settings_handle_key(wm, ni);
+        return true;
+    }
+
     /* The always-on toggle works in BOTH modes and is never forwarded. */
-    if (ni->id == VP_TOGGLE_KEY) {
+    if (ni->id == wm->config.toggle_key) {
         toggle_mode(wm);
         return true;
     }
@@ -126,23 +522,10 @@ bool input_handle_key(WM *wm, const ncinput *ni)
 
     unsigned mods = eff_mods(ni);
 
-    /* Alt+1..9: focus/restore the window in taskbar slot N. */
-    if (mods == NCKEY_MOD_ALT && ni->id >= '1' && ni->id <= '9') {
-        int slot = (int)(ni->id - '1');
-        if (slot < wm->nwins) {
-            Window *win = wm->wins[slot];
-            if (win->minimized) {
-                wm_restore(wm, win);
-            } else {
-                wm_focus_window(wm, win);
-            }
-        }
-        return true;
-    }
-
-    for (size_t i = 0; i < sizeof(g_keymap) / sizeof(g_keymap[0]); i++) {
-        if (g_keymap[i].id == ni->id && g_keymap[i].mods == mods) {
-            do_action(wm, g_keymap[i].act);
+    const VpConfig *cfg = &wm->config;
+    for (int i = 0; i < cfg->nkeys; i++) {
+        if (cfg->keymap[i].id == ni->id && cfg->keymap[i].mods == mods) {
+            do_action(wm, cfg->keymap[i].act);
             return true;
         }
     }
@@ -181,14 +564,11 @@ static VTermModifier to_vmod(unsigned mods)
 
 /* ----- title-bar hit testing (must mirror window_draw_frame's layout) ----- */
 
-typedef enum { HIT_MOVE, HIT_MODE, HIT_MIN, HIT_MAX, HIT_CLOSE } titlehit;
+typedef enum { HIT_MOVE, HIT_MIN, HIT_MAX, HIT_CLOSE } titlehit;
 
 static titlehit titlebar_hit(const Window *win, int relx)
 {
     int w = win->w;
-    if (w >= 6 && relx >= 1 && relx <= 3) {
-        return HIT_MODE; /* the "[K]"/"[P]" indicator */
-    }
     int btnx = w - 1 - 9; /* "[_][▢][x]" is 9 columns wide */
     if (btnx > 4) {
         if (relx >= btnx && relx < btnx + 3)         return HIT_MIN;
@@ -390,6 +770,10 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
     }
     Window *win = wm_window_at(wm, y, x);
     if (!win) {
+        /* Empty desktop: maybe the settings launcher icon was clicked. */
+        if (settings_icon_hit(wm, y, x)) {
+            settings_open(wm);
+        }
         return;
     }
     wm_focus_window(wm, win);
@@ -415,7 +799,6 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
             return;
         }
         switch (titlebar_hit(win, relx)) {
-        case HIT_MODE:  toggle_mode(wm); return;
         case HIT_MIN:   wm_minimize(wm, win); return;
         case HIT_MAX:   wm_toggle_maximize(wm, win); return;
         case HIT_CLOSE: win->dead = true; vp_log("close id=%d (button)\n", win->id); return;
@@ -488,6 +871,18 @@ static void mouse_motion(WM *wm, int y, int x, unsigned mods)
 
 static void mouse_event(WM *wm, mev_type t, int btn, int y, int x, unsigned mods)
 {
+    /* Modal settings editor takes the mouse while open. */
+    if (wm->settings.open) {
+        if (t == MEV_PRESS) {
+            settings_click(wm, btn, y, x);
+        } else if (t == MEV_SCROLL_UP) {
+            settings_scroll(wm, -1);
+        } else if (t == MEV_SCROLL_DOWN) {
+            settings_scroll(wm, +1);
+        }
+        return;
+    }
+
     switch (t) {
     case MEV_PRESS:       mouse_press(wm, btn, y, x, mods); break;
     case MEV_RELEASE:     mouse_release(wm, btn, y, x, mods); break;

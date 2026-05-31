@@ -25,6 +25,7 @@
 #define VIEWPOINT_H
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <sys/types.h>
 #include <notcurses/notcurses.h>
 #include <vterm.h>
@@ -65,6 +66,48 @@ typedef enum {
 
 /* Gated debug log (active only when $VP_DEBUG names a writable file). */
 void vp_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+/* ------------------------------------------------------------------------- */
+/* Config                                                                    */
+/* ------------------------------------------------------------------------- */
+
+/* WM chord actions — the targets a key binding can be bound to. The string
+ * names accepted in the config file live alongside the dispatcher in input.c. */
+typedef enum {
+    ACT_FOCUS_NEXT, ACT_FOCUS_PREV, ACT_CLOSE, ACT_NEW, ACT_MIN, ACT_MAXTOGGLE,
+    ACT_MOVE_L, ACT_MOVE_R, ACT_MOVE_U, ACT_MOVE_D,
+    ACT_RESIZE_L, ACT_RESIZE_R, ACT_RESIZE_U, ACT_RESIZE_D,
+    /* Focus/restore the window in taskbar slot N. Kept contiguous (slot N is
+     * ACT_SLOT_1 + (N-1)) so the dispatcher can recover the slot index. */
+    ACT_SLOT_1, ACT_SLOT_2, ACT_SLOT_3, ACT_SLOT_4, ACT_SLOT_5,
+    ACT_SLOT_6, ACT_SLOT_7, ACT_SLOT_8, ACT_SLOT_9,
+} vp_action;
+
+/* A single key chord → action binding. 'mods' is matched exactly against the
+ * SHIFT/ALT/CTRL bits (lock bits are ignored). */
+typedef struct {
+    uint32_t id;
+    unsigned mods;
+    vp_action act;
+} keychord;
+
+/* Parsed user configuration, read from $XDG_CONFIG_HOME/viewpoint/viewpoint.conf
+ * (see config.c). Currently this is just the customizable keymap: it starts as
+ * a copy of the built-in defaults, which `bind`/`unbind` lines then edit. */
+typedef struct VpConfig {
+    bool loaded;        /* a config file was found and parsed */
+
+    keychord *keymap;   /* malloc'd chord table (defaults + user overrides) */
+    int nkeys;
+    int keycap;
+
+    uint32_t toggle_key; /* the always-on INTERPRET↔PASSTHROUGH key */
+
+    /* Verbatim text of the file's hand-written "manual" section, captured at
+     * load. config_save() preserves it untouched and only rewrites the
+     * app-managed section below it. NULL if there was none. */
+    char *manual_text;
+} VpConfig;
 
 /* ------------------------------------------------------------------------- */
 /* Window                                                                    */
@@ -131,6 +174,19 @@ typedef enum {
     SNAP_BR,
 } vp_snapzone;
 
+/* In-app keybinding editor. A modal panel opened from a desktop launcher icon;
+ * while open it captures all input. See settings.c. */
+typedef struct Settings {
+    bool open;
+    bool capturing;          /* waiting for a keypress to assign to row `sel` */
+    int  sel;                /* selected row: 0..ACTION_COUNT-1, then the toggle */
+    int  scroll;             /* first visible row in the scrolling list */
+    bool dirty;              /* panel needs a redraw */
+    struct ncplane *icon;    /* desktop launcher (low z, above the background) */
+    struct ncplane *panel;   /* the modal panel (created on open) */
+    char status[128];        /* transient status/hint line */
+} Settings;
+
 typedef struct WM {
     struct notcurses *nc;
     struct ncplane *std; /* standard plane (background / desktop) */
@@ -165,7 +221,40 @@ typedef struct WM {
     int gpm_fd;
 
     bool should_quit;
+
+    VpConfig config;
+    Settings settings;
 } WM;
+
+/* ------------------------------------------------------------------------- */
+/* config.c                                                                  */
+/* ------------------------------------------------------------------------- */
+
+/* Resolve the config file path into buf: $XDG_CONFIG_HOME/viewpoint/viewpoint.conf,
+ * falling back to ~/.config/viewpoint/viewpoint.conf. Returns false if neither
+ * XDG_CONFIG_HOME nor HOME is set, or the path doesn't fit in buflen. */
+bool config_path(char *buf, size_t buflen);
+
+/* Reset cfg to built-in defaults (no file read). */
+void config_defaults(VpConfig *cfg);
+
+/* Set defaults, then overlay any settings from the config file. A missing file
+ * is not an error: cfg is left at defaults. */
+void config_load(VpConfig *cfg);
+
+/* Release anything config_load/config_defaults allocated (the keymap). */
+void config_free(VpConfig *cfg);
+
+/* Write the current keymap + toggle key back to the config file (creating the
+ * directory if needed). Overwrites the file. Returns false on I/O error. */
+bool config_save(const VpConfig *cfg);
+
+/* True if a binding just changed in-app would be overridden by the manual
+ * config section on the next load (so the change won't fully persist). With
+ * is_toggle=true it checks the toggle key; otherwise it checks whether the
+ * manual section governs action `act` or the chord (id,mods). */
+bool config_manual_shadows(const VpConfig *live, bool is_toggle,
+                           vp_action act, uint32_t id, unsigned mods);
 
 /* ------------------------------------------------------------------------- */
 /* pty.c                                                                     */
@@ -252,6 +341,60 @@ Window *wm_window_at(WM *wm, int y, int x);
 /* Returns true if the key was consumed by the WM; false if it should be
  * forwarded to the focused window. Always consumes the toggle key. */
 bool input_handle_key(WM *wm, const ncinput *ni);
+
+/* Keymap construction. The default chord table and the action/key name tables
+ * the config parser needs live in input.c, next to the dispatcher. */
+
+/* Fill cfg->keymap with the built-in default chords and the default toggle key
+ * (allocates cfg->keymap). */
+void keymap_load_defaults(VpConfig *cfg);
+
+/* Parse a "alt+shift+left"-style chord plus an action name and add/override the
+ * binding in cfg. Returns false (and logs) on a parse error. */
+bool keymap_bind(VpConfig *cfg, const char *chord, const char *action);
+
+/* Remove any binding for the given chord. Returns false (and logs) only on a
+ * parse error; an absent binding is not an error. */
+bool keymap_unbind(VpConfig *cfg, const char *chord);
+
+/* Parse a chord and set it as the mode-toggle key (modifiers are ignored, to
+ * match how the toggle is dispatched). Returns false (and logs) on error. */
+bool keymap_set_toggle(VpConfig *cfg, const char *chord);
+
+/* Queries used by the in-app settings editor and the config writer. */
+int  keymap_action_count(void);
+bool keymap_action_info(int row, vp_action *act, const char **label);
+const char *keymap_action_name(vp_action act);
+void keymap_format_chord(uint32_t id, unsigned mods, char *buf, size_t n);
+/* Format the chord currently bound to `act` into buf; false (buf="(unbound)")
+ * if nothing is bound to it. */
+bool keymap_chord_for_action(const VpConfig *cfg, vp_action act, char *buf, size_t n);
+/* Translate a live keypress to a chord; false for bare modifiers/locks/mouse. */
+bool keymap_chord_from_input(const ncinput *ni, uint32_t *id, unsigned *mods);
+/* Bind `act` to exactly (id,mods), dropping its previous chord(s). */
+void keymap_rebind_action(VpConfig *cfg, vp_action act, uint32_t id, unsigned mods);
+/* Remove every chord bound to `act` (leaving it unbound). */
+void keymap_unbind_action(VpConfig *cfg, vp_action act);
+
+/* ------------------------------------------------------------------------- */
+/* settings.c                                                                */
+/* ------------------------------------------------------------------------- */
+
+/* Create the desktop launcher icon (kept just above the background). */
+void settings_init(WM *wm);
+/* Open / close the modal keybinding editor. Closing persists to the config. */
+void settings_open(WM *wm);
+void settings_close(WM *wm);
+/* True if absolute cell (y,x) lands on the launcher icon. */
+bool settings_icon_hit(WM *wm, int y, int x);
+/* Modal input handlers (called only while the editor is open). */
+void settings_handle_key(WM *wm, const ncinput *ni);
+void settings_click(WM *wm, int btn, int y, int x);
+void settings_scroll(WM *wm, int dir);
+/* Redraw the panel if open and dirty (called from the WM render pass). */
+void settings_render(WM *wm);
+/* Destroy planes on shutdown. */
+void settings_teardown(WM *wm);
 
 void input_route_mouse(WM *wm, const ncinput *ni);
 

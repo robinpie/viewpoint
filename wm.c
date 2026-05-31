@@ -36,6 +36,7 @@ void wm_init(WM *wm, struct notcurses *nc)
     wm->next_id = 1;
     wm->mode = MODE_INTERPRET;
     wm->gpm_fd = -1;
+    config_load(&wm->config);
     notcurses_stddim_yx(nc, &wm->scr_rows, &wm->scr_cols);
 
     /* Desktop background: a dim field so floating windows stand out. */
@@ -167,9 +168,10 @@ void wm_focus_next(WM *wm, int dir)
 
 Window *wm_spawn_window(WM *wm)
 {
-    /* Cascade new windows from the top-left. */
+    /* Cascade new windows from the top-left, but clear of the desktop settings
+     * icon (which sits in roughly the leftmost ~13 columns). */
     int n = wm->nwins;
-    int x = 2 + (n % 6) * 4;
+    int x = 16 + (n % 6) * 4;
     int y = 1 + (n % 6) * 2;
     int w = (int)wm->scr_cols * 2 / 3;
     int h = (int)wm->scr_rows * 2 / 3;
@@ -320,6 +322,9 @@ void wm_handle_resize(WM *wm)
         win->frame_dirty = true;
     }
     wm->taskbar_dirty = true;
+    if (wm->settings.open) {
+        wm->settings.dirty = true; /* re-center/redraw the panel for the new size */
+    }
 }
 
 Window *wm_window_at(WM *wm, int y, int x)
@@ -362,9 +367,12 @@ void wm_render(WM *wm)
         taskbar_draw(wm);
     }
 
-    /* Inner cursor only for the focused window. */
+    settings_render(wm);
+
+    /* Inner cursor only for the focused window (suppressed while the modal
+     * settings editor is up). */
     Window *f = wm_focused(wm);
-    if (f && !f->minimized && f->cursor_visible &&
+    if (!wm->settings.open && f && !f->minimized && f->cursor_visible &&
         f->currow >= 0 && f->currow < f->rows &&
         f->curcol >= 0 && f->curcol < f->cols) {
         int ay, ax;
