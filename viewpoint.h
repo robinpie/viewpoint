@@ -114,10 +114,12 @@ typedef enum {
     DRAG_CONTENT, /* button held over a window's content; route to the app */
 } vp_dragkind;
 
-/* Resize-edge bitmask (top edge is the title bar => move, never resize). */
+/* Resize-edge bitmask. The top edge is the title bar (drag = move), but its
+ * two corner cells (┌ ┐) still resize diagonally. */
 #define RZ_LEFT   1
 #define RZ_RIGHT  2
 #define RZ_BOTTOM 4
+#define RZ_TOP    8
 
 typedef enum {
     SNAP_NONE = 0,
@@ -154,6 +156,7 @@ typedef struct WM {
     int drag_off_y;
     int resize_edge;    /* RZ_* bitmask while DRAG_RESIZE */
     int drag_ax;        /* anchor: original right column (for left-edge resize) */
+    int drag_ay;        /* anchor: original bottom row (for top-edge resize) */
     vp_snapzone snap_preview; /* currently-shown snap outline */
     struct ncplane *snap_plane;
 

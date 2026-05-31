@@ -45,7 +45,7 @@ viewpoint has one global toggle that flips between two modes:
 
 The toggle key, `F12`, works in both modes and is never forwarded to a program. The current mode is shown both on the taskbar (`INTERPT [K]` / `PASSTHRU [P]`) and on each window's title bar (`[K]` / `[P]`); clicking either indicator toggles the mode too.
 
-Modifier-chord reliability is best in terminals that support the Kitty keyboard protocol. We try to support all reasonable terminals, but some deliver certain key combinations oddly.
+We try to support all reasonably behaved terminals, but some deliver certain key combinations oddly (or never get them due to the DE capturing them, e.g. `Alt`+`Tab`).
 
 ### Keymap
 

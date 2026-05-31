@@ -78,14 +78,13 @@ static const keychord g_keymap[] = {
 #undef A
 #undef AS
 
-/* Effective modifier mask. notcurses sets the NCKEY_MOD_* bits when a rich
- * keyboard protocol (e.g. Kitty) is active, but in legacy input mode it only
- * sets the deprecated ni->alt/shift/ctrl bools — e.g. Konsole's ESC-prefixed
- * Alt+key arrives as alt=1 with modifiers==0. Fold both sources together so
- * chords match regardless of which the terminal gave us. */
+/* Effective modifier mask. We use the classical legacy input path: notcurses
+ * delivers modifiers through the deprecated ni->alt/shift/ctrl bools — e.g.
+ * Konsole's ESC-prefixed Alt+key arrives as alt=1. Translate those into the
+ * NCKEY_MOD_* bits the keymap is expressed in. */
 static unsigned eff_mods(const ncinput *ni)
 {
-    unsigned mods = ni->modifiers & (NCKEY_MOD_SHIFT | NCKEY_MOD_ALT | NCKEY_MOD_CTRL);
+    unsigned mods = 0;
     if (ni->alt)   mods |= NCKEY_MOD_ALT;
     if (ni->shift) mods |= NCKEY_MOD_SHIFT;
     if (ni->ctrl)  mods |= NCKEY_MOD_CTRL;
@@ -363,6 +362,13 @@ static void update_drag(WM *wm, int y, int x)
             if (nw < VP_MIN_W) { nw = VP_MIN_W; nx = right - nw + 1; }
             if (nx < 0) { nx = 0; nw = right + 1; }
         }
+        if (wm->resize_edge & RZ_TOP) {
+            int bottom = wm->drag_ay;
+            ny = y;
+            nh = bottom - y + 1;
+            if (nh < VP_MIN_H) { nh = VP_MIN_H; ny = bottom - nh + 1; }
+            if (ny < 0) { ny = 0; nh = bottom + 1; }
+        }
         window_set_geometry(win, nx, ny, nw, nh);
         return;
     }
@@ -392,6 +398,22 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
     int relx = x - win->x;
 
     if (rely == 0) {
+        /* The title bar's corner cells (┌ ┐) resize diagonally; the rest of
+         * the top row is buttons or drag-to-move. */
+        int corner = 0;
+        if (relx == 0)            corner = RZ_TOP | RZ_LEFT;
+        else if (relx == win->w - 1) corner = RZ_TOP | RZ_RIGHT;
+        if (corner) {
+            if (win->maximized) {
+                win->maximized = false;
+            }
+            wm->drag = DRAG_RESIZE;
+            wm->drag_win = win->id;
+            wm->resize_edge = corner;
+            wm->drag_ax = win->x + win->w - 1; /* anchor right for left-edge drags */
+            wm->drag_ay = win->y + win->h - 1; /* anchor bottom for top-edge drags */
+            return;
+        }
         switch (titlebar_hit(win, relx)) {
         case HIT_MODE:  toggle_mode(wm); return;
         case HIT_MIN:   wm_minimize(wm, win); return;
