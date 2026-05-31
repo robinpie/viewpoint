@@ -169,6 +169,7 @@ Window *wm_spawn_window(WM *wm)
     wm_add_window(wm, win);
     wm_clamp_onscreen(wm, win);
     wm_focus_window(wm, win);
+    vp_log("spawn id=%d nwins=%d\n", win->id, wm->nwins);
     return win;
 }
 
@@ -177,6 +178,7 @@ void wm_close_focused(WM *wm)
     Window *win = wm_focused(wm);
     if (win) {
         win->dead = true; /* destroyed at end of the loop pass */
+        vp_log("close id=%d\n", win->id);
     }
 }
 
@@ -186,6 +188,7 @@ void wm_minimize(WM *wm, Window *win)
         return;
     }
     win->minimized = true;
+    vp_log("minimize id=%d\n", win->id);
     /* Park the frame off-screen (content rides along as a bound child). */
     ncplane_move_yx(win->frame, VP_HIDDEN_Y, win->x);
 
@@ -208,6 +211,7 @@ void wm_restore(WM *wm, Window *win)
         return;
     }
     win->minimized = false;
+    vp_log("restore id=%d\n", win->id);
     ncplane_move_yx(win->frame, win->y, win->x);
     win->frame_dirty = true;
     win->dirty = true;
@@ -221,6 +225,7 @@ void wm_toggle_maximize(WM *wm, Window *win)
         return;
     }
     int avail_h = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
+    vp_log("maxtoggle id=%d was_max=%d\n", win->id, win->maximized);
     if (!win->maximized) {
         win->sx = win->x;
         win->sy = win->y;
