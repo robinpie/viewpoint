@@ -13,7 +13,7 @@ You need the development headers and libraries for notcurses, libvterm and GPM, 
 
 On Arch Linux: `sudo pacman -S notcurses libvterm gpm base-devel`
 
-notcurses and libvterm are located via `pkg-config`. GPM has no `.pc` file, so it is linked directly with `-lgpm`. For a mouse on the bare Linux console you also need the `gpm` daemon running.
+notcurses and libvterm are located via `pkg-config`. GPM is linked directly with `-lgpm`. For a mouse on the bare Linux console, you also need the `gpm` daemon running.
 
 ## Run
 
@@ -28,7 +28,7 @@ viewpoint expects to fully own the terminal. Running viewpoint inside another mu
 
 viewpoint has one global toggle that flips between two modes:
 
-- INTERPRET (default): window-manager chords (below) are handled by viewpoint; everything else is forwarded to the focused window's program.
+- INTERPRET: window-manager chords (below) are handled by viewpoint; everything else is forwarded to the focused window's program.
 - PASSTHROUGH: every keystroke (except the toggle key) is forwarded to the focused program
 
 The toggle key works in both modes and is never forwarded to a program (except the settings menu). The current mode is shown on on the taskbar (`INTERPRET` / `PASSTHROUGH`).
@@ -37,7 +37,7 @@ We try to support all reasonably behaved terminals, but some deliver certain key
 
 ### Keymap
 
-These are the default chords active in INTERPRET mode.
+These are the default keybinds. They are fully editable through an XDG-style config file or an in-app settings menu.
 
 | Key                           | Action                                   |
 |-------------------------------|------------------------------------------|
@@ -71,20 +71,20 @@ These are the default chords active in INTERPRET mode.
 
 ## Configuration
 
-viewpoint reads an optional config file from `$XDG_CONFIG_HOME/viewpoint/viewpoint.conf`.
+viewpoint reads an config file from `$XDG_CONFIG_HOME/viewpoint/viewpoint.conf`. It will be created automatically on first run. It can be manually edited, and the in-app settings menu also stores configuration in this file.
 
-### In-app keybinding editor
+### In-app settings panel
 
-The quickest way to rebind keys is the `⚙ Settings` icon at the top-left of the
-desktop. Clicking it opens a modal editor listing every action with its current
-chord (and the mode-toggle key):
+The `⚙ Settings` icon at the top-left of the desktop opens a modal settings panel. It lands on a grid of tiles; pick a tile (click, or `↑`/`↓`/`←`/`→` then `Enter`) to open it. A click outside the panel (or `Esc`) closes the panel.
+
+The `Keybindings` tile opens the keybinding editor. It lists every action with its current keybinding.
 
 - `↑`/`↓` (or click a row) to select an action
 - `Enter` (or click the row again) then press the chord you want. Changes take effect instantly.
-- `D` / `Delete` to unbind the selected action
-- `S` to save now, `Esc` (or click outside the panel) to close
+- `D` to unbind the selected action
+- `S` to save now, `Esc` (or click outside the panel) to return to the grid
 
-If a change you make in the editor is governed by your manual config section, the status line warns you, but the manual section wins, so that change won't survive a restart.
+If a change you make in the editor is also governed by your manual config section, the status line warns you, but the manual section wins, so that change won't survive a restart.
 
 ### Configuration file
 
@@ -104,14 +104,14 @@ The config file has two parts:
 It is a line-oriented `key = value` file; `#` starts a comment and blank lines are ignored. 
 
 ```conf
-# Add or change a chord:  bind = <chord> <action>
+# Add or change a keybinding:  bind = <chord> <action>
 bind = alt+enter new
 bind = alt+q     close
 
 # Drop a default chord:
 unbind = alt+f4
 
-# Change the always-on mode-toggle key (default f12):
+# Change the mode toggle key:
 toggle = f12
 
 # Pin a desktop icon's top-left corner:  icon = <name> <x> <y>

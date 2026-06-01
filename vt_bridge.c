@@ -15,7 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* vt_bridge.c — the libvterm <-> notcurses ncplane bridge.
+/* vt_bridge.c - the libvterm <-> notcurses ncplane bridge.
  *
  * Each window owns a VTerm instance fed by its PTY master's bytes. On any
  * screen change we (phase-1 strategy) mark the whole window dirty and re-sweep
@@ -211,8 +211,8 @@ static VTermModifier vterm_mods(const ncinput *ni)
     VTermModifier mod = VTERM_MOD_NONE;
     /* notcurses carries modifiers two ways and does not keep them in sync (see
      * the "FIXME for abi4" on ncinput): the deprecated alt/shift/ctrl bools (set
-     * by the legacy path — e.g. Konsole's ESC-prefixed Alt arrives as alt=1) and
-     * the ni->modifiers bitmask (set by the kitty/CSI-u path — e.g. Ctrl+c
+     * by the legacy path - e.g. Konsole's ESC-prefixed Alt arrives as alt=1) and
+     * the ni->modifiers bitmask (set by the kitty/CSI-u path - e.g. Ctrl+c
      * arrives as id='c' with NCKEY_MOD_CTRL and the bool left clear). Consult
      * both, or e.g. a forwarded Ctrl+c degrades to a bare 'c' for the app. */
     if (ni->shift || (ni->modifiers & NCKEY_MOD_SHIFT)) mod |= VTERM_MOD_SHIFT;
@@ -259,7 +259,7 @@ void vt_send_key(Window *w, const ncinput *ni)
     }
 
     /* notcurses uppercases ASCII letters whenever Ctrl or Shift is held, for
-     * cross-backend consistency (see load_ncinput() in notcurses) — so Ctrl+c
+     * cross-backend consistency (see load_ncinput() in notcurses) - so Ctrl+c
      * reaches us as 'C'. But libvterm only folds *lowercase* a-z down to a C0
      * control byte (c & 0x1f); handed an uppercase letter with Ctrl it instead
      * emits a CSI-u sequence ("\e[67;5u"), which inner apps that never enabled

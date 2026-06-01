@@ -22,7 +22,7 @@ It is built on three libraries:
 | `input.c`     | Keyboard chords vs. forwarding; the unified mouse model; snapping; GPM; keymap defaults + parsing |
 | `taskbar.c`   | Bottom taskbar: per-window slots + mode indicator                      |
 | `config.c`    | Load/save the config file (`viewpoint.conf`); the customizable keymap   |
-| `settings.c`  | Desktop launcher icon + the modal in-app keybinding editor             |
+| `settings.c`  | Desktop launcher icon + the modal settings panel            |
 | `viewpoint.h` | Shared declarations and tunables                                       |
 
 ### Debug log

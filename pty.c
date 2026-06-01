@@ -15,7 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* pty.c — PTY allocation and child shell setup via forkpty(). */
+/* pty.c - PTY allocation and child shell setup via forkpty(). */
 #define _GNU_SOURCE
 #include "viewpoint.h"
 

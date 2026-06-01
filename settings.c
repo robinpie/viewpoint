@@ -15,7 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* settings.c — the in-app settings panel.
+/* settings.c - the in-app settings panel.
  *
  * A small launcher "icon" sits on the desktop (top-left, just above the
  * background). Clicking it opens a modal panel that lands on a Control-Panel
@@ -24,7 +24,7 @@
  * placeholders, ready for future settings). While the panel is open it captures
  * all keyboard/mouse input (see the hooks in input.c).
  *
- * Keybinding editor: select a row (↑/↓ or click) and press Enter — the next
+ * Keybinding editor: select a row (↑/↓ or click) and press Enter - the next
  * chord you press is bound to that action live. Esc returns to the grid; Esc on
  * the grid closes the panel and persists the keymap via config_save(). The heavy
  * lifting (chord parsing/format, rebinding) lives in input.c/config.c; this file
@@ -452,7 +452,7 @@ static void apply_capture(WM *wm, uint32_t id, unsigned mods)
         wm->config.toggle_key = id; /* modifiers ignored for the toggle */
         if (config_manual_shadows(&wm->config, true, 0, id, mods)) {
             snprintf(s->status, sizeof(s->status),
-                     "Toggle set to %s — your manual config overrides it on restart", cb);
+                     "Toggle set to %s - your manual config overrides it on restart", cb);
         } else {
             snprintf(s->status, sizeof(s->status), "Toggle key set to %s", cb);
         }
@@ -463,7 +463,7 @@ static void apply_capture(WM *wm, uint32_t id, unsigned mods)
         keymap_rebind_action(&wm->config, act, id, mods);
         if (config_manual_shadows(&wm->config, false, act, id, mods)) {
             snprintf(s->status, sizeof(s->status),
-                     "%s = %s — your manual config overrides it on restart",
+                     "%s = %s - your manual config overrides it on restart",
                      label ? label : "", cb);
         } else {
             snprintf(s->status, sizeof(s->status), "%s = %s", label ? label : "", cb);
@@ -485,7 +485,7 @@ static void do_unbind(WM *wm)
         keymap_unbind_action(&wm->config, act);
         if (config_manual_shadows(&wm->config, false, act, 0, 0)) {
             snprintf(s->status, sizeof(s->status),
-                     "%s unbound — your manual config rebinds it on restart",
+                     "%s unbound - your manual config rebinds it on restart",
                      label ? label : "");
         } else {
             snprintf(s->status, sizeof(s->status), "%s unbound", label ? label : "");

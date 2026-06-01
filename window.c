@@ -15,7 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* window.c — per-window lifecycle and frame (chrome) drawing.
+/* window.c - per-window lifecycle and frame (chrome) drawing.
  *
  * A window is a decoration ("frame") plane that parents a "content" plane.
  * The frame draws the border ring + title bar; the content plane sits in the
@@ -207,8 +207,8 @@ static void proc_cwd(pid_t pid, char *out, size_t outlen)
 }
 
 /* Recompute the title from the PTY's foreground process group: the running
- * program's name, or — when the shell itself is in the foreground (idle at its
- * prompt) — user@host:cwd. Returns true if the title changed (so callers can
+ * program's name, or - when the shell itself is in the foreground (idle at its
+ * prompt) - user@host:cwd. Returns true if the title changed (so callers can
  * refresh the frame/taskbar). */
 static uint64_t mono_ns(void)
 {
@@ -225,7 +225,7 @@ bool window_refresh_title(Window *win)
 
     /* Deriving the title hits /proc (tcgetpgrp + readlink/fopen). wm_render
      * calls this for every window on every pass, so throttle each window to at
-     * most one poll per VP_TITLE_POLL_MS — otherwise a window streaming output
+     * most one poll per VP_TITLE_POLL_MS - otherwise a window streaming output
      * (which renders constantly) would re-poll /proc on every frame. */
     uint64_t now = mono_ns();
     if (now < win->title_poll_ns) {

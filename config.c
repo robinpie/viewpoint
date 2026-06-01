@@ -15,7 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* config.c — locate, parse and apply the user config file.
+/* config.c - locate, parse and apply the user config file.
  *
  * The config lives at $XDG_CONFIG_HOME/viewpoint/viewpoint.conf, falling back
  * to ~/.config/viewpoint/viewpoint.conf when XDG_CONFIG_HOME is unset. It is an
@@ -78,7 +78,7 @@ static char *trim(char *s)
 #define CFG_INAPP_HDR  "# in-app/automatically set configuration:"
 
 /* Markers are matched by prefix (after trimming) so trailing content on the
- * marker line — e.g. "# manual configuration: (your settings)" — still flags
+ * marker line - e.g. "# manual configuration: (your settings)" - still flags
  * the section instead of being silently swallowed into the wrong block. */
 static bool is_marker(const char *line, const char *marker)
 {
@@ -110,7 +110,7 @@ static bool config_apply(VpConfig *cfg, const char *key, char *val, int line)
         return keymap_set_toggle(cfg, val);
     }
     if (strcmp(key, "icon") == 0) {
-        /* value is "<name> <x> <y>" — a desktop launcher icon's top-left cell */
+        /* value is "<name> <x> <y>" - a desktop launcher icon's top-left cell */
         char name[16];
         int x, y;
         if (sscanf(val, "%15s %d %d", name, &x, &y) != 3) {
@@ -319,7 +319,7 @@ bool config_manual_shadows(const VpConfig *live, bool is_toggle,
                            vp_action act, uint32_t id, unsigned mods)
 {
     if (!live->manual_text || !*live->manual_text) {
-        return false; /* no manual section — nothing can shadow */
+        return false; /* no manual section - nothing can shadow */
     }
 
     VpConfig defs, mbase;
@@ -398,7 +398,7 @@ void config_load(VpConfig *cfg)
 
     FILE *f = fopen(path, "r");
     if (!f) {
-        /* Absent config is the normal case — run with built-in defaults. */
+        /* Absent config is the normal case - run with built-in defaults. */
         vp_log("config: no file at %s; using defaults\n", path);
         return;
     }

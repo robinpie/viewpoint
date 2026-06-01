@@ -15,7 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* viewpoint.h — shared declarations for the viewpoint terminal multiplexer.
+/* viewpoint.h - shared declarations for the viewpoint terminal multiplexer.
  *
  * A single-process, single-threaded, poll(2)-driven WM that presents floating
  * "windows", each running a shell/app in its own PTY + libvterm instance, drawn
@@ -80,7 +80,7 @@ void vp_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 /* Config                                                                    */
 /* ------------------------------------------------------------------------- */
 
-/* WM chord actions — the targets a key binding can be bound to. The string
+/* WM chord actions - the targets a key binding can be bound to. The string
  * names accepted in the config file live alongside the dispatcher in input.c. */
 typedef enum {
     ACT_FOCUS_NEXT, ACT_FOCUS_PREV, ACT_CLOSE, ACT_NEW, ACT_MIN, ACT_MAXTOGGLE,
@@ -162,7 +162,7 @@ typedef struct Window {
     bool cursor_visible;
 
     /* CLOCK_MONOTONIC (ns) before which window_refresh_title skips its /proc
-     * poll — throttles title updates to VP_TITLE_POLL_MS. */
+     * poll - throttles title updates to VP_TITLE_POLL_MS. */
     uint64_t title_poll_ns;
 
     char title[VP_TITLE_MAX];
@@ -247,17 +247,17 @@ typedef struct WM {
     /* Bare Linux console vs. a GUI terminal emulator. On the console we own a
      * GPM connection directly and draw a software pointer; in a GUI terminal
      * notcurses decodes the mouse and the emulator draws the hardware cursor.
-     * The two mouse sources are mutually exclusive — enabling both makes the
+     * The two mouse sources are mutually exclusive - enabling both makes the
      * two libgpm clients in-process fight over GPM's shared global state. */
     bool console;
 
-    /* software mouse pointer — drawn only on the console, where the full-screen
+    /* software mouse pointer - drawn only on the console, where the full-screen
      * repaint erases the cell-inverting pointer gpm would otherwise draw. */
     struct ncplane *cursor;
     bool draw_cursor;
     int mouse_y, mouse_x;
 
-    /* GPM — the bare-console mouse source (only when `console`). */
+    /* GPM - the bare-console mouse source (only when `console`). */
     bool gpm_active;
     int gpm_fd;
 

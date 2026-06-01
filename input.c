@@ -15,11 +15,11 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* input.c — input routing: keyboard (WM chords vs. forward-to-app) and mouse
+/* input.c - input routing: keyboard (WM chords vs. forward-to-app) and mouse
  * (focus, title-bar drag-move, border-resize, content forwarding, taskbar).
  * Two mouse sources feed one source-agnostic model (mouse_event): notcurses in
  * a GUI terminal, and our own GPM connection on the bare Linux console. Exactly
- * one is active per run — see the GPM block at the bottom for why.
+ * one is active per run - see the GPM block at the bottom for why.
  */
 #define _GNU_SOURCE
 #include "viewpoint.h"
@@ -47,7 +47,7 @@ static void toggle_mode(WM *wm)
     vp_log("mode=%s\n", wm->mode == MODE_PASSTHROUGH ? "PASSTHRU" : "INTERPRET");
 }
 
-/* The built-in keymap, in one editable table — these are the *defaults*; the
+/* The built-in keymap, in one editable table - these are the *defaults*; the
  * config file (bind/unbind lines) edits the live copy in WM.config. 'mods' is
  * matched exactly against the SHIFT/ALT/CTRL bits (lock bits are ignored). */
 #define A  NCKEY_MOD_ALT
@@ -274,7 +274,7 @@ bool keymap_bind(VpConfig *cfg, const char *chord, const char *action)
 
 bool keymap_unbind(VpConfig *cfg, const char *chord)
 {
-    /* "unbind = all" clears the whole table — used by the in-app save so the
+    /* "unbind = all" clears the whole table - used by the in-app save so the
      * written file is a complete snapshot rather than an overlay on defaults. */
     if (ci_eq(chord, "all") || strcmp(chord, "*") == 0) {
         cfg->nkeys = 0;
@@ -296,7 +296,7 @@ bool keymap_unbind(VpConfig *cfg, const char *chord)
             return true;
         }
     }
-    return true; /* nothing bound to that chord — not an error */
+    return true; /* nothing bound to that chord - not an error */
 }
 
 bool keymap_set_toggle(VpConfig *cfg, const char *chord)
@@ -523,7 +523,7 @@ bool input_handle_key(WM *wm, const ncinput *ni)
         return true;
     }
 
-    /* In PASSTHROUGH, nothing else is interpreted — everything goes to the app. */
+    /* In PASSTHROUGH, nothing else is interpreted - everything goes to the app. */
     if (wm->mode != MODE_INTERPRET) {
         return false;
     }
@@ -533,7 +533,7 @@ bool input_handle_key(WM *wm, const ncinput *ni)
     /* Normalize the keypress to a chord id the keymap can match. The keymap
      * stores letters lowercased (so SHIFT alone expresses the upper case), but
      * notcurses uppercases ASCII letters whenever Ctrl or Shift is held (see
-     * vt_send_key) — so e.g. a bound shift+a / ctrl+a arrives as 'A'. Fold it
+     * vt_send_key) - so e.g. a bound shift+a / ctrl+a arrives as 'A'. Fold it
      * back down exactly as the capture path does (keymap_chord_from_input). */
     uint32_t id = ni->id;
     if (id < 0x80 && isalpha((int)id)) {
@@ -565,7 +565,7 @@ static Window *find_by_id(WM *wm, int id)
 /* ------------------------------------------------------------------------- */
 /* Source-agnostic mouse model. notcurses funnels every backend (terminal mouse
  * protocols and GPM on the console alike) into ncinput, which input_route_mouse
- * turns into mouse_event() — so the WM mouse logic lives in exactly one place. */
+ * turns into mouse_event() - so the WM mouse logic lives in exactly one place. */
 /* ------------------------------------------------------------------------- */
 
 typedef enum {
@@ -838,7 +838,7 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
     if (!win) {
         /* Empty desktop: a launcher icon may have been grabbed. Begin a drag;
          * a release that never moved it is treated as a plain click (which then
-         * opens settings / quits — see mouse_release). */
+         * opens settings / quits - see mouse_release). */
         struct ncplane *icon = NULL;
         if (settings_icon_hit(wm, y, x)) {
             icon = wm->settings.icon;
@@ -1084,11 +1084,11 @@ void input_route_mouse(WM *wm, const ncinput *ni)
 }
 
 /* ------------------------------------------------------------------------- */
-/* GPM — the bare Linux console mouse. Used only on a real VT, and only when    */
+/* GPM - the bare Linux console mouse. Used only on a real VT, and only when    */
 /* notcurses' own mouse decoding is left off (we never enable both: two libgpm  */
 /* clients in one process collide over GPM's shared global connection state).   */
 /* Unlike notcurses, we request the full event mask, so bare hover motion       */
-/* (GPM_MOVE) is delivered — that's what lets the software pointer track.        */
+/* (GPM_MOVE) is delivered - that's what lets the software pointer track.        */
 /* ------------------------------------------------------------------------- */
 
 #include <gpm.h>
@@ -1124,7 +1124,7 @@ void gpm_pump(WM *wm)
     Gpm_Event ev;
     int r = Gpm_GetEvent(&ev);
     if (r <= 0) {
-        /* EOF/error: the GPM server went away — drop back to no console mouse. */
+        /* EOF/error: the GPM server went away - drop back to no console mouse. */
         gpm_teardown(wm);
         return;
     }

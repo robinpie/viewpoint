@@ -15,7 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* wm.c — window-manager core: the window list, focus, z-order/stacking,
+/* wm.c - window-manager core: the window list, focus, z-order/stacking,
  * layout (move/resize/min/max), spawning/closing, and the render pass.
  *
  * notcurses' plane z-order is the source of truth for stacking; we raise the

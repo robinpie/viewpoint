@@ -15,7 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* main.c — initialization and the single poll(2)-based event loop (the spine).
+/* main.c - initialization and the single poll(2)-based event loop (the spine).
  *
  * One poll set contains: notcurses' input fd, the GPM fd (bare console only),
  * and every window's PTY master fd. In a GUI terminal notcurses decodes the
@@ -149,7 +149,7 @@ int main(void)
 
     /* Own the terminal fully: stop the line discipline from turning ctrl+c,
      * ctrl+\ and ctrl+z into SIGINT/SIGQUIT/SIGTSTP for *us*. As a multiplexer
-     * we must deliver those bytes to the focused window's program instead — and
+     * we must deliver those bytes to the focused window's program instead - and
      * without this, ctrl+c would just kill viewpoint (notcurses' own quit
      * sighandler tears down and exits) even in PASSTHROUGH mode. */
     notcurses_linesigs_disable(nc);
@@ -184,7 +184,7 @@ int main(void)
     /* GUI terminal only: notcurses enables any-motion tracking (?1003h) but then
      * enables X11 press/release tracking (?1000h). On terminals where the
      * last-set mouse tracking mode wins (e.g. Konsole), that leaves us with
-     * press/release only and no button-held motion — so drags don't update live.
+     * press/release only and no button-held motion - so drags don't update live.
      * Render once so notcurses flushes its own mouse setup, then re-assert
      * button-event (drag) tracking + SGR encoding so a motion-reporting mode is
      * the active one. These xterm sequences are meaningless on the console. */

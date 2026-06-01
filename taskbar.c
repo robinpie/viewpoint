@@ -15,7 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* taskbar.c — a full-width bar pinned to the bottom row, above all windows.
+/* taskbar.c - a full-width bar pinned to the bottom row, above all windows.
  *
  * Shows one slot per window (id + short title, marked if minimized), highlights
  * the focused window, and shows the global mode indicator + clickable toggle.
@@ -156,7 +156,7 @@ void taskbar_draw(WM *wm)
         }
 
         char buf[SLOT_W + 1];
-        /* "N:title" — wrap minimized titles in brackets. The slot field width
+        /* "N:title" - wrap minimized titles in brackets. The slot field width
          * below truncates; this buffer just holds the untruncated string. */
         char title[VP_TITLE_MAX + 16];
         snprintf(title, sizeof(title), "%d:%s", win->id, win->title);
@@ -267,7 +267,7 @@ void taskbar_reveal(WM *wm, int win_idx)
     }
     compute_layout(wm); /* refresh g_maxfit / g_maxscroll for the current geometry */
     if (g_maxfit < 1 || wm->nwins <= g_maxfit) {
-        return; /* everything fits — nothing to scroll into view */
+        return; /* everything fits - nothing to scroll into view */
     }
     int s = wm->taskbar_scroll;
     if (win_idx < s) {
