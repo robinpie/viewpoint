@@ -168,6 +168,9 @@ void wm_focus_index(WM *wm, int idx)
     win->frame_dirty = true;
     wm->taskbar_dirty = true;
 
+    /* Scroll the taskbar so the newly focused window's slot is visible. */
+    taskbar_reveal(wm, idx);
+
     /* Keep the taskbar above all windows. */
     if (wm->taskbar) {
         ncplane_move_top(wm->taskbar);

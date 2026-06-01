@@ -71,6 +71,7 @@ static const keychord g_default_keymap[] = {
     { '1', A, ACT_SLOT_1 }, { '2', A, ACT_SLOT_2 }, { '3', A, ACT_SLOT_3 },
     { '4', A, ACT_SLOT_4 }, { '5', A, ACT_SLOT_5 }, { '6', A, ACT_SLOT_6 },
     { '7', A, ACT_SLOT_7 }, { '8', A, ACT_SLOT_8 }, { '9', A, ACT_SLOT_9 },
+    { ',', A, ACT_TASKBAR_L }, { '.', A, ACT_TASKBAR_R },
 };
 
 #undef A
@@ -105,6 +106,8 @@ static const struct { const char *name; const char *label; vp_action act; } g_ac
     { "slot7", "Focus taskbar slot 7", ACT_SLOT_7 },
     { "slot8", "Focus taskbar slot 8", ACT_SLOT_8 },
     { "slot9", "Focus taskbar slot 9", ACT_SLOT_9 },
+    { "taskbar_left",  "Scroll taskbar left",  ACT_TASKBAR_L },
+    { "taskbar_right", "Scroll taskbar right", ACT_TASKBAR_R },
 };
 
 #define ACTION_COUNT ((int)(sizeof(g_action_names) / sizeof(g_action_names[0])))
@@ -501,6 +504,8 @@ static void do_action(WM *wm, vp_action act)
     case ACT_SLOT_4: case ACT_SLOT_5: case ACT_SLOT_6:
     case ACT_SLOT_7: case ACT_SLOT_8: case ACT_SLOT_9:
         focus_slot(wm, (int)(act - ACT_SLOT_1)); break;
+    case ACT_TASKBAR_L: taskbar_scroll_by(wm, -1); break;
+    case ACT_TASKBAR_R: taskbar_scroll_by(wm, +1); break;
     }
 }
 
@@ -565,6 +570,7 @@ static Window *find_by_id(WM *wm, int id)
 
 typedef enum {
     MEV_PRESS, MEV_RELEASE, MEV_MOTION, MEV_SCROLL_UP, MEV_SCROLL_DOWN,
+    MEV_SCROLL_LEFT, MEV_SCROLL_RIGHT,
 } mev_type;
 
 static VTermModifier to_vmod(unsigned mods)
@@ -713,9 +719,11 @@ static void content_forward(Window *win, mev_type t, int btn,
     switch (t) {
     case MEV_PRESS:       vt_mouse_button(win, btn, true, vm);  break;
     case MEV_RELEASE:     vt_mouse_button(win, btn, false, vm); break;
-    case MEV_SCROLL_UP:   vt_mouse_button(win, 4, true, vm);    break;
-    case MEV_SCROLL_DOWN: vt_mouse_button(win, 5, true, vm);    break;
-    case MEV_MOTION:      break; /* the move above is the event */
+    case MEV_SCROLL_UP:    vt_mouse_button(win, 4, true, vm);    break;
+    case MEV_SCROLL_DOWN:  vt_mouse_button(win, 5, true, vm);    break;
+    case MEV_SCROLL_LEFT:  vt_mouse_button(win, 6, true, vm);    break;
+    case MEV_SCROLL_RIGHT: vt_mouse_button(win, 7, true, vm);    break;
+    case MEV_MOTION:       break; /* the move above is the event */
     }
 }
 
@@ -1029,6 +1037,16 @@ static void mouse_event(WM *wm, mev_type t, int btn, int y, int x, unsigned mods
     case MEV_SCROLL_DOWN:
         content_forward(wm_window_at(wm, y, x), t, btn, y, x, mods);
         break;
+    case MEV_SCROLL_LEFT:
+    case MEV_SCROLL_RIGHT:
+        /* Horizontal wheel over the taskbar row scrolls its window slots;
+         * anywhere else it's forwarded to the hovered app. */
+        if (wm->taskbar && y == (int)wm->scr_rows - 1) {
+            taskbar_scroll_by(wm, t == MEV_SCROLL_LEFT ? -1 : +1);
+        } else {
+            content_forward(wm_window_at(wm, y, x), t, btn, y, x, mods);
+        }
+        break;
     }
 }
 
@@ -1058,6 +1076,8 @@ void input_route_mouse(WM *wm, const ncinput *ni)
     }
     case NCKEY_BUTTON4: mouse_event(wm, MEV_SCROLL_UP, 4, y, x, mods); break;
     case NCKEY_BUTTON5: mouse_event(wm, MEV_SCROLL_DOWN, 5, y, x, mods); break;
+    case NCKEY_BUTTON6: mouse_event(wm, MEV_SCROLL_LEFT, 6, y, x, mods); break;
+    case NCKEY_BUTTON7: mouse_event(wm, MEV_SCROLL_RIGHT, 7, y, x, mods); break;
     case NCKEY_MOTION:  mouse_event(wm, MEV_MOTION, 0, y, x, mods); break;
     default: break;
     }
@@ -1122,6 +1142,10 @@ void gpm_pump(WM *wm)
         mouse_event(wm, MEV_SCROLL_UP, 4, y, x, mods);
     } else if (ev.wdy < 0) {
         mouse_event(wm, MEV_SCROLL_DOWN, 5, y, x, mods);
+    } else if (ev.wdx < 0) {
+        mouse_event(wm, MEV_SCROLL_LEFT, 6, y, x, mods);
+    } else if (ev.wdx > 0) {
+        mouse_event(wm, MEV_SCROLL_RIGHT, 7, y, x, mods);
     } else if (ev.type & GPM_DOWN) {
         mouse_event(wm, MEV_PRESS, btn, y, x, mods);
     } else if (ev.type & GPM_UP) {

@@ -51,6 +51,7 @@ These are the default chords active in INTERPRET mode.
 | `Alt`+`1` … `Alt`+`9`         | Focus / restore window in taskbar slot N |
 | `Alt`+`←`/`→`/`↑`/`↓`         | Move focused window                      |
 | `Alt`+`Shift`+`←`/`→`/`↑`/`↓` | Resize focused window                    |
+| `Alt`+`,` / `Alt`+`.`         | Scroll the taskbar left / right (when more windows are open than fit) |
 
 ### Mouse
 
@@ -62,6 +63,7 @@ These are the default chords active in INTERPRET mode.
 | Drag a window border or corner                | Resize the window                        |
 | Drag the title bar to a screen edge / corner  | Snap to half / quarter (outline preview shown; applied on release) |
 | Click a taskbar slot                          | Focus, or restore if minimized           |
+| Horizontal scroll / click the `◄` `►` arrows  | Scroll the taskbar when more windows are open than fit |
 | Click the taskbar mode region                 | Toggle global mode                       |
 | Click the `⚙ Settings` icon (desktop top-left)| Open the settings menu                   |
 | Click the `⏻ Exit` icon (desktop bottom-right)| Quit viewpoint                           |
@@ -120,7 +122,7 @@ icon = exit 60 20
 
 A chord is an optional `alt+`/`shift+`/`ctrl+` modifier prefix followed by a key: a single character (`n`, `x`), a function key (`f1`…`f60`), or a named key (`tab`, `enter`, `esc`, `space`, `left`/`right`/`up`/`down`, `home`, `end`, `pgup`, `pgdn`, `delete`, `insert`, `backspace`).
 
-The available actions are: `focus_next`, `focus_prev`, `new`, `close`, `minimize`, `maximize`, `move_left`/`move_right`/`move_up`/`move_down`, `resize_left`/`resize_right`/`resize_up`/`resize_down`, and `slot1`…`slot9` (focus/restore the window in taskbar slot N).
+The available actions are: `focus_next`, `focus_prev`, `new`, `close`, `minimize`, `maximize`, `move_left`/`move_right`/`move_up`/`move_down`, `resize_left`/`resize_right`/`resize_up`/`resize_down`, `slot1`…`slot9` (focus/restore the window in taskbar slot N), and `taskbar_left`/`taskbar_right` (scroll the taskbar's window slots).
 
 ## Acknowledgements
 

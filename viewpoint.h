@@ -90,6 +90,8 @@ typedef enum {
      * ACT_SLOT_1 + (N-1)) so the dispatcher can recover the slot index. */
     ACT_SLOT_1, ACT_SLOT_2, ACT_SLOT_3, ACT_SLOT_4, ACT_SLOT_5,
     ACT_SLOT_6, ACT_SLOT_7, ACT_SLOT_8, ACT_SLOT_9,
+    /* Scroll the taskbar's window slots when more windows are open than fit. */
+    ACT_TASKBAR_L, ACT_TASKBAR_R,
 } vp_action;
 
 /* A single key chord → action binding. 'mods' is matched exactly against the
@@ -196,10 +198,20 @@ typedef enum {
     SNAP_MAX,
 } vp_snapzone;
 
-/* In-app keybinding editor. A modal panel opened from a desktop launcher icon;
- * while open it captures all input. See settings.c. */
+/* Which screen the modal settings panel is showing: the Control-Panel grid of
+ * tiles (the landing page) or the keybinding editor reached from it. */
+typedef enum {
+    SETTINGS_VIEW_GRID = 0,  /* Control-Panel tile grid (landing page) */
+    SETTINGS_VIEW_KEYBINDINGS,
+} settings_view;
+
+/* In-app settings. A modal panel opened from a desktop launcher icon; while open
+ * it captures all input. It lands on a Control-Panel grid (settings_view) whose
+ * tiles open sub-views; the keybinding editor is one such tile. See settings.c. */
 typedef struct Settings {
     bool open;
+    settings_view view;      /* current screen (grid vs. a sub-view) */
+    int  grid_sel;           /* selected tile in the Control-Panel grid */
     bool capturing;          /* waiting for a keypress to assign to row `sel` */
     int  sel;                /* selected row: 0..ACTION_COUNT-1, then the toggle */
     int  scroll;             /* first visible row in the scrolling list */
@@ -226,6 +238,7 @@ typedef struct WM {
     /* taskbar */
     struct ncplane *taskbar;
     bool taskbar_dirty;
+    int  taskbar_scroll; /* index of first window shown when slots overflow */
 
     /* desktop "Exit" launcher icon, bottom-right (low z, above the background).
      * Clicking it quits viewpoint; closing every window no longer does. */
@@ -482,5 +495,11 @@ void taskbar_reflow(WM *wm);
 void taskbar_draw(WM *wm);
 /* Handle a click at absolute (y,x) on the taskbar; returns true if consumed. */
 bool taskbar_click(WM *wm, int y, int x);
+/* Scroll the window slots by `delta` slots (clamped). Used by the horizontal
+ * scrollwheel, the ◄► taskbar arrows, and the scroll-taskbar chords. */
+void taskbar_scroll_by(WM *wm, int delta);
+/* Scroll the slots just enough to bring window index `win_idx` into view (no-op
+ * if it already is, or if the slots don't overflow). Called on focus change. */
+void taskbar_reveal(WM *wm, int win_idx);
 
 #endif /* VIEWPOINT_H */

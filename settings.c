@@ -15,17 +15,20 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* settings.c — the in-app keybinding editor.
+/* settings.c — the in-app settings panel.
  *
  * A small launcher "icon" sits on the desktop (top-left, just above the
- * background). Clicking it opens a modal panel that lists every WM action with
- * its current chord plus the mode-toggle key. While the panel is open it
- * captures all keyboard/mouse input (see the hooks in input.c).
+ * background). Clicking it opens a modal panel that lands on a Control-Panel
+ * grid of tiles; each tile opens a sub-view. Currently the only populated tile
+ * is "Keybindings", which opens the keybinding editor (the rest are empty
+ * placeholders, ready for future settings). While the panel is open it captures
+ * all keyboard/mouse input (see the hooks in input.c).
  *
- * Editing: select a row (↑/↓ or click) and press Enter — the next chord you
- * press is bound to that action live. Closing the panel persists the keymap to
- * the config file via config_save(). The heavy lifting (chord parsing/format,
- * rebinding) lives in input.c/config.c; this file is just UI + state.
+ * Keybinding editor: select a row (↑/↓ or click) and press Enter — the next
+ * chord you press is bound to that action live. Esc returns to the grid; Esc on
+ * the grid closes the panel and persists the keymap via config_save(). The heavy
+ * lifting (chord parsing/format, rebinding) lives in input.c/config.c; this file
+ * is just UI + state.
  */
 #define _GNU_SOURCE
 #include "viewpoint.h"
@@ -40,9 +43,35 @@
 #define ICON_W 12
 #define ICON_H 4
 
-/* Panel sizing. Height/width are clamped to the screen at open/draw time. */
+/* Keybinding-view panel sizing. Clamped to the screen at open/draw time. */
 #define PANEL_W      56
 #define PANEL_CHROME 4   /* top border + status + hint + bottom border */
+
+/* Control-Panel grid: a fixed lattice of tiles (à la a classic Control Panel),
+ * the panel's landing page. Only the first GRID_ENTRY_COUNT cells are populated;
+ * the rest are drawn as empty placeholders for future settings. */
+#define GRID_COLS  3
+#define GRID_ROWS  3
+#define GRID_CELLS (GRID_COLS * GRID_ROWS)
+#define TILE_W     16
+#define TILE_H     5
+#define TILE_GAP   1
+/* The grid sits inside the panel border with a one-cell margin; a title row and
+ * a status row bracket it. */
+#define GRID_ORIGIN_Y 2   /* first tile row (row 0 border, row 1 gap) */
+#define GRID_ORIGIN_X 2   /* first tile col (col 0 border, col 1 margin) */
+
+/* A populated Control-Panel tile: a glyph, a caption, and the sub-view it opens. */
+typedef struct {
+    const char   *glyph;
+    const char   *label;
+    settings_view view;
+} grid_entry;
+
+static const grid_entry g_grid_entries[] = {
+    { "⌨", "Keybindings", SETTINGS_VIEW_KEYBINDINGS },
+};
+#define GRID_ENTRY_COUNT ((int)(sizeof(g_grid_entries) / sizeof(g_grid_entries[0])))
 
 /* ----- small helpers ----------------------------------------------------- */
 
@@ -61,16 +90,35 @@ static void clamp_icon_pos(const WM *wm, int h, int w, int *y, int *x)
 static int total_rows(void)        { return keymap_action_count() + 1; }
 static bool is_toggle_row(int r)   { return r == keymap_action_count(); }
 
-/* Desired centered panel geometry for the current screen size. */
+/* Full Control-Panel grid dimensions (interior tiles only, no panel chrome). */
+static int grid_inner_w(void) { return GRID_COLS * TILE_W + (GRID_COLS - 1) * TILE_GAP; }
+static int grid_inner_h(void) { return GRID_ROWS * TILE_H + (GRID_ROWS - 1) * TILE_GAP; }
+
+/* Top-left of grid cell `i` (row-major) within the panel. */
+static void tile_rect(int i, int *ty, int *tx)
+{
+    int row = i / GRID_COLS;
+    int col = i % GRID_COLS;
+    *ty = GRID_ORIGIN_Y + row * (TILE_H + TILE_GAP);
+    *tx = GRID_ORIGIN_X + col * (TILE_W + TILE_GAP);
+}
+
+/* Desired centered panel geometry for the current screen size and view. */
 static void panel_geom(const WM *wm, int *y, int *x, int *h, int *w)
 {
-    int W = PANEL_W;
+    int W, H;
+    if (wm->settings.view == SETTINGS_VIEW_GRID) {
+        /* border + margin on each side, a title row above and status row below. */
+        W = grid_inner_w() + 2 * GRID_ORIGIN_X;
+        H = grid_inner_h() + GRID_ORIGIN_Y + 2; /* +status row +bottom border */
+    } else {
+        W = PANEL_W;
+        if (W < 24) W = 24;
+        H = total_rows() + PANEL_CHROME;
+        if (H < PANEL_CHROME + 1) H = PANEL_CHROME + 1;
+    }
     if (W > (int)wm->scr_cols - 2) W = (int)wm->scr_cols - 2;
-    if (W < 24) W = 24;
-
-    int H = total_rows() + PANEL_CHROME;
     if (H > (int)wm->scr_rows - 2) H = (int)wm->scr_rows - 2;
-    if (H < PANEL_CHROME + 1) H = PANEL_CHROME + 1;
 
     int py = ((int)wm->scr_rows - H) / 2;
     int px = ((int)wm->scr_cols - W) / 2;
@@ -322,14 +370,45 @@ void settings_open(WM *wm)
     ncplane_set_base(s->panel, " ", 0, base);
 
     s->open = true;
+    s->view = SETTINGS_VIEW_GRID;
+    s->grid_sel = 0;
     s->capturing = false;
     s->sel = 0;
     s->scroll = 0;
     s->dirty = true;
     snprintf(s->status, sizeof(s->status),
-             "Enter: rebind   D: unbind   S: save   Esc: close");
+             "↑/↓/←/→: select   Enter: open   Esc: close");
     ncplane_move_top(s->panel);
     vp_log("settings: open\n");
+}
+
+/* Switch the panel to a sub-view (or back to the grid), seeding its UI state. */
+static void settings_set_view(WM *wm, settings_view v)
+{
+    Settings *s = &wm->settings;
+    s->view = v;
+    s->capturing = false;
+    s->dirty = true;
+    if (v == SETTINGS_VIEW_KEYBINDINGS) {
+        s->sel = 0;
+        s->scroll = 0;
+        snprintf(s->status, sizeof(s->status),
+                 "Enter: rebind   D: unbind   S: save   Esc: back");
+    } else {
+        snprintf(s->status, sizeof(s->status),
+                 "↑/↓/←/→: select   Enter: open   Esc: close");
+    }
+    vp_log("settings: view -> %d\n", (int)v);
+}
+
+/* "Back": from a sub-view, return to the grid; from the grid, close the panel. */
+static void settings_back(WM *wm)
+{
+    if (wm->settings.view == SETTINGS_VIEW_GRID) {
+        settings_close(wm);
+    } else {
+        settings_set_view(wm, SETTINGS_VIEW_GRID);
+    }
 }
 
 void settings_close(WM *wm)
@@ -417,10 +496,54 @@ static void do_unbind(WM *wm)
 
 /* ----- input ------------------------------------------------------------- */
 
+/* Move the grid selection by (drow, dcol), clamped to the populated tiles. */
+static void grid_move(WM *wm, int drow, int dcol)
+{
+    Settings *s = &wm->settings;
+    int row = s->grid_sel / GRID_COLS + drow;
+    int col = s->grid_sel % GRID_COLS + dcol;
+    if (row < 0) row = 0;
+    if (col < 0) col = 0;
+    if (col > GRID_COLS - 1) col = GRID_COLS - 1;
+    int idx = row * GRID_COLS + col;
+    if (idx >= 0 && idx < GRID_ENTRY_COUNT) {
+        s->grid_sel = idx;
+        s->dirty = true;
+    }
+}
+
+static void settings_grid_key(WM *wm, const ncinput *ni)
+{
+    Settings *s = &wm->settings;
+    switch (ni->id) {
+    case NCKEY_UP:    grid_move(wm, -1, 0); break;
+    case NCKEY_DOWN:  grid_move(wm, +1, 0); break;
+    case NCKEY_LEFT:  grid_move(wm, 0, -1); break;
+    case NCKEY_RIGHT: grid_move(wm, 0, +1); break;
+    case NCKEY_ENTER:
+    case ' ':
+        if (s->grid_sel >= 0 && s->grid_sel < GRID_ENTRY_COUNT) {
+            settings_set_view(wm, g_grid_entries[s->grid_sel].view);
+        }
+        break;
+    case NCKEY_ESC:
+    case 'q': case 'Q':
+        settings_close(wm);
+        break;
+    default:
+        break;
+    }
+}
+
 void settings_handle_key(WM *wm, const ncinput *ni)
 {
     Settings *s = &wm->settings;
     if (!s->open) {
+        return;
+    }
+
+    if (s->view == SETTINGS_VIEW_GRID) {
+        settings_grid_key(wm, ni);
         return;
     }
 
@@ -465,7 +588,7 @@ void settings_handle_key(WM *wm, const ncinput *ni)
         break;
     case NCKEY_ESC:
     case 'q': case 'Q':
-        settings_close(wm);
+        settings_back(wm);
         break;
     default:
         break;
@@ -483,14 +606,30 @@ void settings_click(WM *wm, int btn, int y, int x)
     unsigned ph, pw;
     ncplane_dim_yx(s->panel, &ph, &pw);
 
-    /* Click outside the panel: dismiss (and save). */
+    /* Click outside the panel acts like Esc: step back one level (grid → close). */
     if (y < ay || y >= ay + (int)ph || x < ax || x >= ax + (int)pw) {
-        settings_close(wm);
+        settings_back(wm);
+        return;
+    }
+
+    int rely = y - ay;
+    int relx = x - ax;
+
+    /* Grid view: open whichever populated tile was clicked. */
+    if (s->view == SETTINGS_VIEW_GRID) {
+        for (int i = 0; i < GRID_ENTRY_COUNT; i++) {
+            int ty, tx;
+            tile_rect(i, &ty, &tx);
+            if (rely >= ty && rely < ty + TILE_H && relx >= tx && relx < tx + TILE_W) {
+                s->grid_sel = i;
+                settings_set_view(wm, g_grid_entries[i].view);
+                return;
+            }
+        }
         return;
     }
 
     /* Click on a list row: select it and start capturing immediately. */
-    int rely = y - ay;
     int listrow = rely - 1; /* row 0 is the top border */
     if (listrow >= 0 && listrow < viewport_rows(wm)) {
         int row = s->scroll + listrow;
@@ -506,7 +645,7 @@ void settings_click(WM *wm, int btn, int y, int x)
 void settings_scroll(WM *wm, int dir)
 {
     Settings *s = &wm->settings;
-    if (!s->open) {
+    if (!s->open || s->view != SETTINGS_VIEW_KEYBINDINGS) {
         return;
     }
     s->sel += dir;
@@ -516,7 +655,7 @@ void settings_scroll(WM *wm, int dir)
 
 /* ----- drawing ----------------------------------------------------------- */
 
-static void draw_border(struct ncplane *p, int W, int H)
+static void draw_border(struct ncplane *p, int W, int H, const char *title)
 {
     ncplane_set_fg_rgb8(p, 0x60, 0x80, 0xc0);
     ncplane_putegc_yx(p, 0, 0, "┌", NULL);
@@ -532,8 +671,94 @@ static void draw_border(struct ncplane *p, int W, int H)
         ncplane_putegc_yx(p, r, W - 1, "│", NULL);
     }
     ncplane_set_fg_rgb8(p, 0xff, 0xff, 0xff);
-    ncplane_putstr_yx(p, 0, 2, " Keybindings ");
+    ncplane_putstr_yx(p, 0, 2, title);
 }
+
+/* Draw the bottom status line shared by both views. */
+static void draw_status(struct ncplane *p, int W, int H, const char *status)
+{
+    ncplane_set_bg_rgb8(p, 0x1c, 0x1c, 0x28);
+    ncplane_set_fg_rgb8(p, 0xc0, 0xc0, 0x80);
+    char sbuf[128];
+    snprintf(sbuf, sizeof(sbuf), "%-*.*s", W - 4, W - 4, status);
+    ncplane_putstr_yx(p, H - 2, 2, sbuf);
+}
+
+/* ----- the Control-Panel grid -------------------------------------------- */
+
+/* One tile: rounded box, a glyph, and a caption. `populated` tiles that aren't
+ * selected read as live; empty cells are drawn dim. The selected tile glows. */
+static void draw_tile(struct ncplane *p, int ty, int tx,
+                      const char *glyph, const char *label,
+                      bool populated, bool selected)
+{
+    if (selected) {
+        ncplane_set_fg_rgb8(p, 0x9a, 0xd0, 0xff);
+        ncplane_set_bg_rgb8(p, 0x20, 0x50, 0xa0);
+        for (int r = 1; r < TILE_H - 1; r++)
+            for (int c = 1; c < TILE_W - 1; c++)
+                ncplane_putchar_yx(p, ty + r, tx + c, ' ');
+    } else if (populated) {
+        ncplane_set_fg_rgb8(p, 0x60, 0x80, 0xc0);
+        ncplane_set_bg_rgb8(p, 0x1c, 0x1c, 0x28);
+    } else {
+        ncplane_set_fg_rgb8(p, 0x3a, 0x3a, 0x4a);
+        ncplane_set_bg_rgb8(p, 0x1c, 0x1c, 0x28);
+    }
+
+    ncplane_putegc_yx(p, ty, tx, "╭", NULL);
+    ncplane_putegc_yx(p, ty, tx + TILE_W - 1, "╮", NULL);
+    ncplane_putegc_yx(p, ty + TILE_H - 1, tx, "╰", NULL);
+    ncplane_putegc_yx(p, ty + TILE_H - 1, tx + TILE_W - 1, "╯", NULL);
+    for (int c = 1; c < TILE_W - 1; c++) {
+        ncplane_putegc_yx(p, ty, tx + c, "─", NULL);
+        ncplane_putegc_yx(p, ty + TILE_H - 1, tx + c, "─", NULL);
+    }
+    for (int r = 1; r < TILE_H - 1; r++) {
+        ncplane_putegc_yx(p, ty + r, tx, "│", NULL);
+        ncplane_putegc_yx(p, ty + r, tx + TILE_W - 1, "│", NULL);
+    }
+
+    if (!populated) {
+        return;
+    }
+
+    /* Glyph centered near the top, caption beneath it. */
+    if (selected) {
+        ncplane_set_fg_rgb8(p, 0xff, 0xff, 0xff);
+    } else {
+        ncplane_set_fg_rgb8(p, 0x9a, 0xd0, 0xff);
+    }
+    if (glyph) {
+        ncplane_putegc_yx(p, ty + 1, tx + TILE_W / 2 - 1, glyph, NULL);
+    }
+    if (label) {
+        int len = (int)strlen(label);
+        int lx = tx + (TILE_W - len) / 2;
+        if (lx < tx + 1) lx = tx + 1;
+        ncplane_putstr_yx(p, ty + TILE_H - 2, lx, label);
+    }
+}
+
+static void draw_grid(WM *wm, struct ncplane *p, int W, int H)
+{
+    Settings *s = &wm->settings;
+    ncplane_erase(p);
+    draw_border(p, W, H, " Settings ");
+
+    for (int i = 0; i < GRID_CELLS; i++) {
+        int ty, tx;
+        tile_rect(i, &ty, &tx);
+        bool populated = i < GRID_ENTRY_COUNT;
+        const char *glyph = populated ? g_grid_entries[i].glyph : NULL;
+        const char *label = populated ? g_grid_entries[i].label : NULL;
+        draw_tile(p, ty, tx, glyph, label, populated, i == s->grid_sel && populated);
+    }
+
+    draw_status(p, W, H, s->status);
+}
+
+/* ----- the keybinding editor --------------------------------------------- */
 
 static void draw_row(struct ncplane *p, int prow, int W,
                      const char *label, const char *chord,
@@ -573,26 +798,14 @@ static void draw_row(struct ncplane *p, int prow, int W,
     ncplane_putstr_yx(p, prow, chord_x, shown);
 }
 
-void settings_render(WM *wm)
+static void draw_keybindings(WM *wm, struct ncplane *p, int W, int H)
 {
     Settings *s = &wm->settings;
-    if (!s->open || !s->panel || !s->dirty) {
-        return;
-    }
-    struct ncplane *p = s->panel;
-
-    /* Track screen resizes: re-center and re-size to fit. */
-    int py, px, H, W;
-    panel_geom(wm, &py, &px, &H, &W);
-    if (H != (int)ncplane_dim_y(p) || W != (int)ncplane_dim_x(p)) {
-        ncplane_resize_simple(p, (unsigned)H, (unsigned)W);
-    }
-    ncplane_move_yx(p, py, px);
     int v = viewport_rows(wm);
 
     clamp_scroll(wm);
     ncplane_erase(p);
-    draw_border(p, W, H);
+    draw_border(p, W, H, " Keybindings ");
 
     for (int i = 0; i < v; i++) {
         int row = s->scroll + i;
@@ -623,8 +836,31 @@ void settings_render(WM *wm)
     ncplane_set_fg_rgb8(p, 0x80, 0x80, 0x90);
     char hbuf[128];
     snprintf(hbuf, sizeof(hbuf), "%-*.*s", W - 4, W - 4,
-             "↑/↓ select · Enter rebind · D unbind · S save · Esc close");
+             "↑/↓ select · Enter rebind · D unbind · S save · Esc back");
     ncplane_putstr_yx(p, H - 2, 2, hbuf);
+}
+
+void settings_render(WM *wm)
+{
+    Settings *s = &wm->settings;
+    if (!s->open || !s->panel || !s->dirty) {
+        return;
+    }
+    struct ncplane *p = s->panel;
+
+    /* Track screen resizes and view switches: re-center and re-size to fit. */
+    int py, px, H, W;
+    panel_geom(wm, &py, &px, &H, &W);
+    if (H != (int)ncplane_dim_y(p) || W != (int)ncplane_dim_x(p)) {
+        ncplane_resize_simple(p, (unsigned)H, (unsigned)W);
+    }
+    ncplane_move_yx(p, py, px);
+
+    if (s->view == SETTINGS_VIEW_GRID) {
+        draw_grid(wm, p, W, H);
+    } else {
+        draw_keybindings(wm, p, W, H);
+    }
 
     ncplane_move_top(p);
     s->dirty = false;

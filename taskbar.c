@@ -28,6 +28,7 @@
 
 #define SLOT_W 18                 /* columns per window slot */
 #define MODE_W 13                 /* " PASSTHROUGH " region width */
+#define ARROW_W 3                 /* " ◄ " / " ► " clickable scroll arrows */
 
 /* Computed layout, shared between draw and click so they stay in lockstep. */
 typedef struct {
@@ -38,17 +39,56 @@ typedef struct {
 
 static Slot g_slots[256];
 static int  g_nslots;
-static int  g_mode_x0; /* start column of the mode toggle region */
+static int  g_mode_x0;      /* start column of the mode toggle region */
+static int  g_arrow_l_x0;   /* start column of the ◄ arrow, or -1 if not shown */
+static int  g_arrow_r_x0;   /* start column of the ► arrow, or -1 if not shown */
+static int  g_maxscroll;    /* largest valid wm->taskbar_scroll for this layout */
+static int  g_maxfit;       /* number of slots that fit (the visible page size) */
 
 static void compute_layout(WM *wm)
 {
     g_nslots = 0;
     g_mode_x0 = (int)wm->scr_cols - MODE_W;
+    g_arrow_l_x0 = g_arrow_r_x0 = -1;
+    g_maxscroll = 0;
 
-    int x = 0;
-    for (int i = 0; i < wm->nwins && g_nslots < (int)(sizeof(g_slots) / sizeof(g_slots[0])); i++) {
-        if (x + SLOT_W > g_mode_x0) {
-            break; /* no more room before the mode region */
+    /* How many slots fit if we don't reserve room for the scroll arrows. */
+    int maxfit = g_mode_x0 / SLOT_W;
+    if (maxfit < 0) {
+        maxfit = 0;
+    }
+
+    /* Overflow: more windows than fit. Reserve a ◄ / ► arrow region at each end
+     * (only if the bar is wide enough for the arrows plus at least one slot) and
+     * shrink the slot strip accordingly. */
+    int slot_x0 = 0;
+    int slot_x1 = g_mode_x0; /* exclusive */
+    if (wm->nwins > maxfit && g_mode_x0 >= ARROW_W * 2 + SLOT_W) {
+        g_arrow_l_x0 = 0;
+        g_arrow_r_x0 = g_mode_x0 - ARROW_W;
+        slot_x0 = ARROW_W;
+        slot_x1 = g_arrow_r_x0;
+        maxfit = (slot_x1 - slot_x0) / SLOT_W;
+    }
+
+    g_maxfit = maxfit;
+    g_maxscroll = wm->nwins - maxfit;
+    if (g_maxscroll < 0) {
+        g_maxscroll = 0;
+    }
+    if (wm->taskbar_scroll > g_maxscroll) {
+        wm->taskbar_scroll = g_maxscroll;
+    }
+    if (wm->taskbar_scroll < 0) {
+        wm->taskbar_scroll = 0;
+    }
+
+    int x = slot_x0;
+    for (int i = wm->taskbar_scroll;
+         i < wm->nwins && g_nslots < (int)(sizeof(g_slots) / sizeof(g_slots[0]));
+         i++) {
+        if (x + SLOT_W > slot_x1) {
+            break; /* no more room in the slot strip */
         }
         g_slots[g_nslots].win_idx = i;
         g_slots[g_nslots].xstart = x;
@@ -128,6 +168,23 @@ void taskbar_draw(WM *wm)
         ncplane_putstr_yx(t, 0, g_slots[s].xstart, buf);
     }
 
+    /* ◄ / ► scroll arrows (only present when the slots overflow). Each is dimmed
+     * when there's nothing more to reveal in that direction. */
+    if (g_arrow_l_x0 >= 0) {
+        bool live = wm->taskbar_scroll > 0;
+        unsigned char g = live ? 0xff : 0x55;
+        ncplane_set_fg_rgb8(t, g, g, g);
+        ncplane_set_bg_rgb8(t, 0x28, 0x28, 0x30);
+        ncplane_putstr_yx(t, 0, g_arrow_l_x0, " ◄ ");
+    }
+    if (g_arrow_r_x0 >= 0) {
+        bool live = wm->taskbar_scroll < g_maxscroll;
+        unsigned char g = live ? 0xff : 0x55;
+        ncplane_set_fg_rgb8(t, g, g, g);
+        ncplane_set_bg_rgb8(t, 0x28, 0x28, 0x30);
+        ncplane_putstr_yx(t, 0, g_arrow_r_x0, " ► ");
+    }
+
     /* Mode indicator + clickable toggle at the far right. */
     if (g_mode_x0 >= 0) {
         ncplane_set_fg_rgb8(t, 0x10, 0x10, 0x10);
@@ -160,6 +217,16 @@ bool taskbar_click(WM *wm, int y, int x)
         return true;
     }
 
+    /* ◄ / ► scroll arrows. */
+    if (g_arrow_l_x0 >= 0 && x >= g_arrow_l_x0 && x < g_arrow_l_x0 + ARROW_W) {
+        taskbar_scroll_by(wm, -1);
+        return true;
+    }
+    if (g_arrow_r_x0 >= 0 && x >= g_arrow_r_x0 && x < g_arrow_r_x0 + ARROW_W) {
+        taskbar_scroll_by(wm, +1);
+        return true;
+    }
+
     for (int s = 0; s < g_nslots; s++) {
         if (x >= g_slots[s].xstart && x < g_slots[s].xend) {
             Window *win = wm->wins[g_slots[s].win_idx];
@@ -172,4 +239,50 @@ bool taskbar_click(WM *wm, int y, int x)
         }
     }
     return true; /* a click anywhere on the bar is consumed */
+}
+
+void taskbar_scroll_by(WM *wm, int delta)
+{
+    if (!wm->taskbar) {
+        return;
+    }
+    compute_layout(wm); /* refresh g_maxscroll for the current geometry */
+    int s = wm->taskbar_scroll + delta;
+    if (s < 0) {
+        s = 0;
+    }
+    if (s > g_maxscroll) {
+        s = g_maxscroll;
+    }
+    if (s != wm->taskbar_scroll) {
+        wm->taskbar_scroll = s;
+        wm->taskbar_dirty = true;
+    }
+}
+
+void taskbar_reveal(WM *wm, int win_idx)
+{
+    if (!wm->taskbar || win_idx < 0 || win_idx >= wm->nwins) {
+        return;
+    }
+    compute_layout(wm); /* refresh g_maxfit / g_maxscroll for the current geometry */
+    if (g_maxfit < 1 || wm->nwins <= g_maxfit) {
+        return; /* everything fits — nothing to scroll into view */
+    }
+    int s = wm->taskbar_scroll;
+    if (win_idx < s) {
+        s = win_idx;                  /* off the left edge: make it leftmost */
+    } else if (win_idx >= s + g_maxfit) {
+        s = win_idx - g_maxfit + 1;   /* off the right edge: make it rightmost */
+    }
+    if (s < 0) {
+        s = 0;
+    }
+    if (s > g_maxscroll) {
+        s = g_maxscroll;
+    }
+    if (s != wm->taskbar_scroll) {
+        wm->taskbar_scroll = s;
+        wm->taskbar_dirty = true;
+    }
 }
