@@ -16,12 +16,10 @@
  */
 
 /* input.c — input routing: keyboard (WM chords vs. forward-to-app) and mouse
- * (focus, title-bar drag-move, border-resize, content forwarding, taskbar),
- * plus the GPM merge for the bare Linux console.
- *
- * PHASE 2 implements: the always-on mode toggle, click-to-focus, and
- * title-bar drag-to-move. The chord keymap (phase 3), border resize, content
- * forwarding, snapping and GPM (phase 4) are layered on in later passes.
+ * (focus, title-bar drag-move, border-resize, content forwarding, taskbar).
+ * Two mouse sources feed one source-agnostic model (mouse_event): notcurses in
+ * a GUI terminal, and our own GPM connection on the bare Linux console. Exactly
+ * one is active per run — see the GPM block at the bottom for why.
  */
 #define _GNU_SOURCE
 #include "viewpoint.h"
@@ -451,17 +449,20 @@ void keymap_unbind_action(VpConfig *cfg, vp_action act)
     }
 }
 
-/* Effective modifier mask. We use the classical legacy input path: notcurses
- * delivers modifiers through the deprecated ni->alt/shift/ctrl bools — e.g.
- * Konsole's ESC-prefixed Alt+key arrives as alt=1. Translate those into the
- * NCKEY_MOD_* bits the keymap is expressed in. */
+/* Effective modifier mask, expressed in the NCKEY_MOD_* bits the keymap uses.
+ * notcurses carries modifiers two ways and does NOT keep them in sync (see the
+ * "FIXME for abi4" on ncinput): the deprecated ni->alt/shift/ctrl bools (set by
+ * the legacy path, e.g. Konsole's ESC-prefixed Alt arrives as alt=1) and the
+ * ni->modifiers bitmask (set by the kitty/CSI-u path, where e.g. Ctrl+c arrives
+ * as id='c' with NCKEY_MOD_CTRL and the bool left clear). Consult both, or
+ * Ctrl chords silently vanish on terminals that use the newer protocol. */
 static unsigned eff_mods(const ncinput *ni)
 {
-    unsigned mods = 0;
+    unsigned mods = ni->modifiers;
     if (ni->alt)   mods |= NCKEY_MOD_ALT;
     if (ni->shift) mods |= NCKEY_MOD_SHIFT;
     if (ni->ctrl)  mods |= NCKEY_MOD_CTRL;
-    return mods;
+    return mods & (NCKEY_MOD_ALT | NCKEY_MOD_SHIFT | NCKEY_MOD_CTRL);
 }
 
 /* Focus, or restore if minimized, the window in taskbar slot N (0-based). */
@@ -546,8 +547,9 @@ static Window *find_by_id(WM *wm, int id)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Source-agnostic mouse model. notcurses and GPM both translate their native
- * events into mouse_event(), so the WM mouse logic lives in exactly one place. */
+/* Source-agnostic mouse model. notcurses funnels every backend (terminal mouse
+ * protocols and GPM on the console alike) into ncinput, which input_route_mouse
+ * turns into mouse_event() — so the WM mouse logic lives in exactly one place. */
 /* ------------------------------------------------------------------------- */
 
 typedef enum {
@@ -724,18 +726,25 @@ static void update_drag(WM *wm, int y, int x)
     }
 
     if (wm->drag == DRAG_MOVE) {
+        /* Dragging a maximized window's title bar un-maximizes it: it springs
+         * back to its pre-maximize size and follows the cursor, like a modern
+         * desktop. We test for real displacement so a click that doesn't move
+         * (incl. the press/release of a double-click) leaves it maximized. The
+         * grab offset is rescaled across the now-shorter title bar so the
+         * pointer stays at the same proportional spot along it. */
+        if (win->maximized &&
+            (x - wm->drag_off_x != win->x || y - wm->drag_off_y != win->y)) {
+            wm->drag_off_x = (win->w > 1)
+                ? wm->drag_off_x * (win->sw - 1) / (win->w - 1) : 0;
+            win->maximized = false;
+            window_set_geometry(win, win->x, win->y, win->sw, win->sh);
+        }
         int nx = x - wm->drag_off_x;
         int ny = y - wm->drag_off_y;
         if (ny < 0) ny = 0;
         if (ny > (int)wm->scr_rows - 1) ny = (int)wm->scr_rows - 1;
         if (nx < -(win->w - 2)) nx = -(win->w - 2);
         if (nx > (int)wm->scr_cols - 2) nx = (int)wm->scr_cols - 2;
-        /* Actually moving a maximized window pulls it out of maximize. We test
-         * for real displacement so a click that doesn't move (incl. the
-         * press/release of a double-click) leaves it maximized. */
-        if (win->maximized && (nx != win->x || ny != win->y)) {
-            win->maximized = false;
-        }
         window_set_geometry(win, nx, ny, win->w, win->h);
         /* Arm/disarm the edge snap based on the pointer, and keep the dragged
          * window above the outline so it stays visible. */
@@ -786,9 +795,12 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
     }
     Window *win = wm_window_at(wm, y, x);
     if (!win) {
-        /* Empty desktop: maybe the settings launcher icon was clicked. */
+        /* Empty desktop: maybe a launcher icon was clicked. */
         if (settings_icon_hit(wm, y, x)) {
             settings_open(wm);
+        } else if (exit_icon_hit(wm, y, x)) {
+            wm->should_quit = true;
+            vp_log("exit: requested via desktop icon\n");
         }
         return;
     }
@@ -909,6 +921,8 @@ static void mouse_motion(WM *wm, int y, int x, unsigned mods)
 
 static void mouse_event(WM *wm, mev_type t, int btn, int y, int x, unsigned mods)
 {
+    wm_set_mouse_pos(wm, y, x); /* software pointer follows every mouse event */
+
     /* Modal settings editor takes the mouse while open. */
     if (wm->settings.open) {
         if (t == MEV_PRESS) {
@@ -964,9 +978,11 @@ void input_route_mouse(WM *wm, const ncinput *ni)
 }
 
 /* ------------------------------------------------------------------------- */
-/* GPM — the bare Linux console mouse. Active only when running on a real VT;  */
-/* Gpm_Open fails (or returns the "under X/term" sentinel) otherwise, in which */
-/* case we fall back to notcurses' own mouse decoding.                         */
+/* GPM — the bare Linux console mouse. Used only on a real VT, and only when    */
+/* notcurses' own mouse decoding is left off (we never enable both: two libgpm  */
+/* clients in one process collide over GPM's shared global connection state).   */
+/* Unlike notcurses, we request the full event mask, so bare hover motion       */
+/* (GPM_MOVE) is delivered — that's what lets the software pointer track.        */
 /* ------------------------------------------------------------------------- */
 
 #include <gpm.h>
@@ -977,7 +993,7 @@ void gpm_setup(WM *wm)
     wm->gpm_fd = -1;
 
     Gpm_Connect conn;
-    conn.eventMask   = (unsigned short)~0;  /* all event types */
+    conn.eventMask   = (unsigned short)~0;  /* all event types, incl. GPM_MOVE */
     conn.defaultMask = 0;                   /* don't let anything pass to the VT */
     conn.minMod      = 0;
     conn.maxMod      = (unsigned short)~0;
@@ -990,7 +1006,7 @@ void gpm_setup(WM *wm)
         wm->gpm_fd = fd;
         vp_log("gpm: active fd=%d\n", fd);
     } else {
-        vp_log("gpm: unavailable (%d); using notcurses mouse\n", fd);
+        vp_log("gpm: unavailable (%d); no console mouse\n", fd);
     }
 }
 

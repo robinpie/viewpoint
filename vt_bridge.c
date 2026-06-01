@@ -209,12 +209,15 @@ void vt_mouse_button(Window *w, int button, bool pressed, VTermModifier mod)
 static VTermModifier vterm_mods(const ncinput *ni)
 {
     VTermModifier mod = VTERM_MOD_NONE;
-    /* Classical legacy input path: notcurses delivers modifiers through the
-     * deprecated alt/shift/ctrl bools (e.g. Konsole's ESC-prefixed Alt arrives
-     * as alt=1). Without this, Alt chords forwarded to the inner app lose Alt. */
-    if (ni->shift) mod |= VTERM_MOD_SHIFT;
-    if (ni->alt)   mod |= VTERM_MOD_ALT;
-    if (ni->ctrl)  mod |= VTERM_MOD_CTRL;
+    /* notcurses carries modifiers two ways and does not keep them in sync (see
+     * the "FIXME for abi4" on ncinput): the deprecated alt/shift/ctrl bools (set
+     * by the legacy path — e.g. Konsole's ESC-prefixed Alt arrives as alt=1) and
+     * the ni->modifiers bitmask (set by the kitty/CSI-u path — e.g. Ctrl+c
+     * arrives as id='c' with NCKEY_MOD_CTRL and the bool left clear). Consult
+     * both, or e.g. a forwarded Ctrl+c degrades to a bare 'c' for the app. */
+    if (ni->shift || (ni->modifiers & NCKEY_MOD_SHIFT)) mod |= VTERM_MOD_SHIFT;
+    if (ni->alt   || (ni->modifiers & NCKEY_MOD_ALT))   mod |= VTERM_MOD_ALT;
+    if (ni->ctrl  || (ni->modifiers & NCKEY_MOD_CTRL))  mod |= VTERM_MOD_CTRL;
     return mod;
 }
 
@@ -253,6 +256,18 @@ void vt_send_key(Window *w, const ncinput *ni)
     /* Ignore the modifier-only and other synthesized events we don't forward. */
     if (nckey_synthesized_p(id)) {
         return;
+    }
+
+    /* notcurses uppercases ASCII letters whenever Ctrl or Shift is held, for
+     * cross-backend consistency (see load_ncinput() in notcurses) — so Ctrl+c
+     * reaches us as 'C'. But libvterm only folds *lowercase* a-z down to a C0
+     * control byte (c & 0x1f); handed an uppercase letter with Ctrl it instead
+     * emits a CSI-u sequence ("\e[67;5u"), which inner apps that never enabled
+     * that protocol print literally. Undo the uppercasing for the Ctrl case so
+     * Ctrl+c yields 0x03. (Shift-only stays uppercase: that 'A' is the real
+     * character to send, and libvterm drops Shift for printable chars anyway.) */
+    if ((mod & VTERM_MOD_CTRL) && id >= 'A' && id <= 'Z') {
+        id += 'a' - 'A';
     }
 
     /* A real Unicode codepoint. libvterm handles modifier + cursor-mode

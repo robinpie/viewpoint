@@ -7,7 +7,8 @@ PKGS     = notcurses vterm
 CFLAGS  += -std=gnu11 -Wall -Wextra -O2 -g
 CFLAGS  += $(shell pkg-config --cflags $(PKGS))
 
-# notcurses/vterm via pkg-config; gpm has no .pc file; forkpty needs libutil.
+# notcurses/vterm via pkg-config; gpm has no .pc file, so it's linked directly
+# with -lgpm (we drive the bare-console mouse ourselves); forkpty needs libutil.
 LDLIBS  += $(shell pkg-config --libs $(PKGS)) -lgpm -lutil
 
 BIN      = viewpoint

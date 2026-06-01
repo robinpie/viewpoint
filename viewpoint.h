@@ -210,6 +210,27 @@ typedef struct WM {
     struct ncplane *taskbar;
     bool taskbar_dirty;
 
+    /* desktop "Exit" launcher icon, bottom-right (low z, above the background).
+     * Clicking it quits viewpoint; closing every window no longer does. */
+    struct ncplane *exit_icon;
+
+    /* Bare Linux console vs. a GUI terminal emulator. On the console we own a
+     * GPM connection directly and draw a software pointer; in a GUI terminal
+     * notcurses decodes the mouse and the emulator draws the hardware cursor.
+     * The two mouse sources are mutually exclusive — enabling both makes the
+     * two libgpm clients in-process fight over GPM's shared global state. */
+    bool console;
+
+    /* software mouse pointer — drawn only on the console, where the full-screen
+     * repaint erases the cell-inverting pointer gpm would otherwise draw. */
+    struct ncplane *cursor;
+    bool draw_cursor;
+    int mouse_y, mouse_x;
+
+    /* GPM — the bare-console mouse source (only when `console`). */
+    bool gpm_active;
+    int gpm_fd;
+
     /* mouse drag state */
     vp_dragkind drag;
     int drag_win;       /* id of window being dragged */
@@ -224,10 +245,6 @@ typedef struct WM {
     /* Title-bar double-click tracking (double-click toggles maximize). */
     uint64_t last_titleclick_ns; /* CLOCK_MONOTONIC of the last move-region click */
     int last_titleclick_win;     /* id of the window it landed on (0 = none) */
-
-    /* gpm */
-    bool gpm_active;
-    int gpm_fd;
 
     bool should_quit;
 
@@ -342,6 +359,10 @@ void wm_clamp_onscreen(WM *wm, Window *win);
 void wm_handle_resize(WM *wm);
 void wm_render(WM *wm);
 
+/* Record the latest pointer position; the software cursor (console only)
+ * follows it on the next render. Called from the mouse input path. */
+void wm_set_mouse_pos(WM *wm, int y, int x);
+
 /* topmost (highest z-order) window whose frame covers absolute cell (y,x);
  * NULL if none. Skips minimized windows. */
 Window *wm_window_at(WM *wm, int y, int x);
@@ -408,9 +429,18 @@ void settings_render(WM *wm);
 /* Destroy planes on shutdown. */
 void settings_teardown(WM *wm);
 
+/* Desktop "Exit" launcher icon (bottom-right; clicking it quits viewpoint). */
+void exit_icon_init(WM *wm);
+/* Re-anchor the icon to the bottom-right corner after a screen resize. */
+void exit_icon_reflow(WM *wm);
+/* True if absolute cell (y,x) lands on the Exit icon. */
+bool exit_icon_hit(WM *wm, int y, int x);
+/* Destroy the icon plane on shutdown. */
+void exit_icon_teardown(WM *wm);
+
 void input_route_mouse(WM *wm, const ncinput *ni);
 
-/* GPM lifecycle + event pump. */
+/* GPM lifecycle + event pump (bare Linux console only). */
 void gpm_setup(WM *wm);
 void gpm_pump(WM *wm);
 void gpm_teardown(WM *wm);

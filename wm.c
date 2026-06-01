@@ -35,7 +35,6 @@ void wm_init(WM *wm, struct notcurses *nc)
     wm->focused = -1;
     wm->next_id = 1;
     wm->mode = MODE_INTERPRET;
-    wm->gpm_fd = -1;
     config_load(&wm->config);
     notcurses_stddim_yx(nc, &wm->scr_rows, &wm->scr_cols);
 
@@ -44,6 +43,37 @@ void wm_init(WM *wm, struct notcurses *nc)
     ncchannels_set_fg_rgb8(&ch, 0x40, 0x44, 0x4c);
     ncchannels_set_bg_rgb8(&ch, 0x10, 0x12, 0x16);
     ncplane_set_base(wm->std, "·", 0, ch);
+
+    /* TERM=linux means the bare Linux console: we drive GPM ourselves (see
+     * main.c) and must draw a software pointer, because gpm's own pointer is a
+     * cell inversion that our full-screen repaint immediately overwrites. In a
+     * GUI terminal the emulator renders the real mouse cursor for us. */
+    const char *term = getenv("TERM");
+    wm->console = term && strncmp(term, "linux", 5) == 0;
+    wm->draw_cursor = wm->console;
+    if (wm->draw_cursor) {
+        ncplane_options o = {0};
+        o.rows = 1;
+        o.cols = 1;
+        wm->cursor = ncplane_create(wm->std, &o);
+        if (wm->cursor) {
+            uint64_t cc = 0;
+            ncchannels_set_fg_rgb8(&cc, 0xff, 0xff, 0xff);
+            ncchannels_set_bg_rgb8(&cc, 0x00, 0x00, 0x00);
+            /* A solid block is unambiguous and always present in console fonts. */
+            ncplane_set_channels(wm->cursor, cc);
+            ncplane_putstr_yx(wm->cursor, 0, 0, "█");
+            ncplane_move_top(wm->cursor);
+        } else {
+            wm->draw_cursor = false;
+        }
+    }
+}
+
+void wm_set_mouse_pos(WM *wm, int y, int x)
+{
+    wm->mouse_y = y;
+    wm->mouse_x = x;
 }
 
 void wm_add_window(WM *wm, Window *win)
@@ -310,6 +340,7 @@ void wm_handle_resize(WM *wm)
     if (wm->taskbar) {
         taskbar_reflow(wm);
     }
+    exit_icon_reflow(wm); /* re-anchor to the new bottom-right corner */
     for (int i = 0; i < wm->nwins; i++) {
         Window *win = wm->wins[i];
         if (win->maximized) {
@@ -385,6 +416,13 @@ void wm_render(WM *wm)
         notcurses_cursor_enable(wm->nc, ay + f->currow, ax + f->curcol);
     } else {
         notcurses_cursor_disable(wm->nc);
+    }
+
+    /* Park the software pointer over the last mouse cell, on top of everything
+     * else (taskbar/settings raise themselves, so re-assert top each frame). */
+    if (wm->draw_cursor && wm->cursor) {
+        ncplane_move_yx(wm->cursor, wm->mouse_y, wm->mouse_x);
+        ncplane_move_top(wm->cursor);
     }
 
     notcurses_render(wm->nc);

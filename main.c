@@ -17,9 +17,11 @@
 
 /* main.c — initialization and the single poll(2)-based event loop (the spine).
  *
- * One poll set contains: notcurses' input fd, the GPM fd (if the bare console
- * mouse is available), and every window's PTY master fd. After draining ready
- * fds we do one render pass over the window stack + taskbar.
+ * One poll set contains: notcurses' input fd, the GPM fd (bare console only),
+ * and every window's PTY master fd. In a GUI terminal notcurses decodes the
+ * mouse on its input fd; on the bare console we read GPM ourselves (the two are
+ * mutually exclusive). After draining ready fds we do one render pass over the
+ * window stack + taskbar.
  */
 #define _GNU_SOURCE
 #include "viewpoint.h"
@@ -79,10 +81,7 @@ static void handle_input(WM *wm, bool *quit)
             continue;
         }
         if (nckey_mouse_p(id)) {
-            /* Prefer GPM on the console; ignore notcurses mouse if GPM active. */
-            if (!wm->gpm_active) {
-                input_route_mouse(wm, &ni);
-            }
+            input_route_mouse(wm, &ni);
             continue;
         }
         if (ni.evtype == NCTYPE_RELEASE) {
@@ -147,13 +146,31 @@ int main(void)
         fprintf(stderr, "viewpoint: failed to initialize notcurses\n");
         return 1;
     }
-    notcurses_mice_enable(nc, NCMICE_ALL_EVENTS);
+
+    /* Own the terminal fully: stop the line discipline from turning ctrl+c,
+     * ctrl+\ and ctrl+z into SIGINT/SIGQUIT/SIGTSTP for *us*. As a multiplexer
+     * we must deliver those bytes to the focused window's program instead — and
+     * without this, ctrl+c would just kill viewpoint (notcurses' own quit
+     * sighandler tears down and exits) even in PASSTHROUGH mode. */
+    notcurses_linesigs_disable(nc);
 
     WM wm;
     wm_init(&wm, nc);
-    gpm_setup(&wm);
+
+    /* Exactly one mouse source. On the bare console we drive GPM ourselves with
+     * the full event mask (so bare hover motion arrives); enabling notcurses'
+     * mice there too would open a second in-process libgpm client and the two
+     * would collide over GPM's shared global state. In a GUI terminal notcurses
+     * decodes the mouse and the emulator draws the pointer. */
+    if (wm.console) {
+        gpm_setup(&wm);
+    } else {
+        notcurses_mice_enable(nc, NCMICE_ALL_EVENTS);
+    }
+
     taskbar_create(&wm);
-    settings_init(&wm); /* desktop launcher icon, below the windows */
+    settings_init(&wm);  /* desktop launcher icon (top-left), below the windows */
+    exit_icon_init(&wm); /* desktop Exit icon (bottom-right), below the windows */
 
     /* Start with two overlapping shells. */
     wm_spawn_window(&wm);
@@ -164,14 +181,15 @@ int main(void)
         return 1;
     }
 
-    /* notcurses enables any-motion tracking (?1003h) but then enables X11
-     * press/release tracking (?1000h). On terminals where the last-set mouse
-     * tracking mode wins (e.g. Konsole), that leaves us with press/release only
-     * and no button-held motion — so drags don't update live. Render once so
-     * notcurses flushes its own mouse setup, then re-assert button-event (drag)
-     * tracking + SGR encoding so a motion-reporting mode is the active one. */
+    /* GUI terminal only: notcurses enables any-motion tracking (?1003h) but then
+     * enables X11 press/release tracking (?1000h). On terminals where the
+     * last-set mouse tracking mode wins (e.g. Konsole), that leaves us with
+     * press/release only and no button-held motion — so drags don't update live.
+     * Render once so notcurses flushes its own mouse setup, then re-assert
+     * button-event (drag) tracking + SGR encoding so a motion-reporting mode is
+     * the active one. These xterm sequences are meaningless on the console. */
     wm_render(&wm);
-    {
+    if (!wm.console) {
         static const char reassert[] = "\x1b[?1002h\x1b[?1003h\x1b[?1006h";
         ssize_t rc = write(STDOUT_FILENO, reassert, sizeof(reassert) - 1);
         (void)rc;
@@ -182,7 +200,8 @@ int main(void)
     bool quit = false;
 
     while (!quit) {
-        /* pollfds: [0]=notcurses input, [1]=gpm (optional), then one per win */
+        /* pollfds: [0]=notcurses input, [1]=gpm (console only), then one per
+         * window PTY */
         int need = wm.nwins + 2;
         if (need > pfds_cap) {
             struct pollfd *np = realloc(pfds, (size_t)need * sizeof(*np));
@@ -255,7 +274,10 @@ int main(void)
                 i++;
             }
         }
-        if (wm.nwins == 0) {
+        /* Closing the last window no longer quits: the desktop persists with
+         * its taskbar and launcher icons. The only ways out are the Exit icon
+         * (wm.should_quit) and host EOF on the input fd. */
+        if (wm.should_quit) {
             quit = true;
         }
 
@@ -270,12 +292,13 @@ int main(void)
     }
     free(wm.wins);
     free(pfds);
+    exit_icon_teardown(&wm);
     settings_teardown(&wm);
     config_free(&wm.config);
     gpm_teardown(&wm);
     /* Undo the motion-tracking modes we re-asserted (notcurses_stop resets the
-     * modes it set itself, but not our extra 1002). */
-    {
+     * modes it set itself, but not our extra 1002). Console runs never set them. */
+    if (!wm.console) {
         static const char off[] = "\x1b[?1002l\x1b[?1003l";
         ssize_t rc = write(STDOUT_FILENO, off, sizeof(off) - 1);
         (void)rc;

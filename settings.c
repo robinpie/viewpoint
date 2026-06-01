@@ -151,6 +151,104 @@ bool settings_icon_hit(WM *wm, int y, int x)
     return y >= ay && y < ay + (int)r && x >= ax && x < ax + (int)c;
 }
 
+/* ----- the desktop "Exit" launcher icon ---------------------------------- */
+/* A sibling of the Settings tile, anchored to the bottom-right corner just
+ * above the taskbar. viewpoint no longer quits when the last window closes, so
+ * this is the explicit way out. */
+
+#define EXIT_W 12
+#define EXIT_H 4
+
+/* Bottom-right, one cell in from the right edge, with a one-row gap above the
+ * taskbar (the taskbar occupies the last row). */
+static void exit_icon_geom(const WM *wm, int *y, int *x)
+{
+    int bottom = (int)wm->scr_rows - (wm->taskbar ? 1 : 0); /* first row below us */
+    *y = bottom - EXIT_H - 1; /* leave a blank row between the icon and taskbar */
+    *x = (int)wm->scr_cols - EXIT_W - 1;
+    if (*y < 0) *y = 0;
+    if (*x < 0) *x = 0;
+}
+
+void exit_icon_init(WM *wm)
+{
+    int iy, ix;
+    exit_icon_geom(wm, &iy, &ix);
+
+    ncplane_options o = {0};
+    o.y = iy;
+    o.x = ix;
+    o.rows = EXIT_H;
+    o.cols = EXIT_W;
+    wm->exit_icon = ncplane_create(wm->std, &o);
+    if (!wm->exit_icon) {
+        return;
+    }
+    struct ncplane *p = wm->exit_icon;
+
+    /* Tile background (a warm red-grey to read as "quit"). */
+    uint64_t base = 0;
+    ncchannels_set_fg_rgb8(&base, 0xf0, 0xe0, 0xe0);
+    ncchannels_set_bg_rgb8(&base, 0x3c, 0x2a, 0x2a);
+    ncplane_set_base(p, " ", 0, base);
+    ncplane_set_bg_rgb8(p, 0x3c, 0x2a, 0x2a);
+    ncplane_erase(p);
+
+    /* Rounded tile border. */
+    ncplane_set_fg_rgb8(p, 0xc0, 0x60, 0x60);
+    ncplane_putegc_yx(p, 0, 0, "╭", NULL);
+    ncplane_putegc_yx(p, 0, EXIT_W - 1, "╮", NULL);
+    ncplane_putegc_yx(p, EXIT_H - 1, 0, "╰", NULL);
+    ncplane_putegc_yx(p, EXIT_H - 1, EXIT_W - 1, "╯", NULL);
+    for (int c = 1; c < EXIT_W - 1; c++) {
+        ncplane_putegc_yx(p, 0, c, "─", NULL);
+        ncplane_putegc_yx(p, EXIT_H - 1, c, "─", NULL);
+    }
+    for (int r = 1; r < EXIT_H - 1; r++) {
+        ncplane_putegc_yx(p, r, 0, "│", NULL);
+        ncplane_putegc_yx(p, r, EXIT_W - 1, "│", NULL);
+    }
+
+    /* Big power symbol, centered on its own row. */
+    ncplane_set_fg_rgb8(p, 0xff, 0x9a, 0x9a);
+    ncplane_putegc_yx(p, 1, EXIT_W / 2 - 1, "⏻", NULL);
+
+    /* Label beneath it. */
+    ncplane_set_fg_rgb8(p, 0xff, 0xff, 0xff);
+    ncplane_putstr_yx(p, 2, 2, "Exit");
+}
+
+void exit_icon_reflow(WM *wm)
+{
+    if (!wm->exit_icon) {
+        return;
+    }
+    int iy, ix;
+    exit_icon_geom(wm, &iy, &ix);
+    ncplane_move_yx(wm->exit_icon, iy, ix);
+}
+
+bool exit_icon_hit(WM *wm, int y, int x)
+{
+    struct ncplane *p = wm->exit_icon;
+    if (!p) {
+        return false;
+    }
+    int ay, ax;
+    ncplane_abs_yx(p, &ay, &ax);
+    unsigned r, c;
+    ncplane_dim_yx(p, &r, &c);
+    return y >= ay && y < ay + (int)r && x >= ax && x < ax + (int)c;
+}
+
+void exit_icon_teardown(WM *wm)
+{
+    if (wm->exit_icon) {
+        ncplane_destroy(wm->exit_icon);
+        wm->exit_icon = NULL;
+    }
+}
+
 /* ----- open / close ------------------------------------------------------ */
 
 void settings_open(WM *wm)

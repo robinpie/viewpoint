@@ -13,7 +13,7 @@ You need the development headers and libraries for notcurses, libvterm and GPM, 
 
 On Arch Linux: `sudo pacman -S notcurses libvterm gpm base-devel`
 
-notcurses and libvterm are located via `pkg-config`. GPM has no `.pc` file, so it is linked directly with `-lgpm`.
+notcurses and libvterm are located via `pkg-config`. GPM has no `.pc` file, so it is linked directly with `-lgpm`. For a mouse on the bare Linux console you also need the `gpm` daemon running.
 
 ## Run
 
@@ -23,8 +23,6 @@ notcurses and libvterm are located via `pkg-config`. GPM has no `.pc` file, so i
 viewpoint expects to fully own the terminal. Running viewpoint inside another multiplexer will not work and is not supported. Running another multiplexer inside viewpoint *may* work but is not supported.
 
 ## Usage
-
-Closing all windows exits viewpoint.
 
 ### Modes
 
@@ -66,6 +64,7 @@ These are the default chords active in INTERPRET mode.
 | Click a taskbar slot                          | Focus, or restore if minimized           |
 | Click the taskbar mode region                 | Toggle global mode                       |
 | Click the `⚙ Settings` icon (desktop top-left)| Open the settings menu                   |
+| Click the `⏻ Exit` icon (desktop bottom-right)| Quit viewpoint                           |
 
 ## Configuration
 
@@ -117,8 +116,14 @@ A chord is an optional `alt+`/`shift+`/`ctrl+` modifier prefix followed by a key
 
 The available actions are: `focus_next`, `focus_prev`, `new`, `close`, `minimize`, `maximize`, `move_left`/`move_right`/`move_up`/`move_down`, `resize_left`/`resize_right`/`resize_up`/`resize_down`, and `slot1`…`slot9` (focus/restore the window in taskbar slot N).
 
+## Acknowledgements
+
+This project uses the following libraries:
+
+- [notcurses](https://github.com/dankamongmen/notcurses)
+- [libvterm](https://www.leonerd.org.uk/code/libvterm/)
+- [GPM](https://www.nico.schottelius.org/software/gpm/)
+
 ---
 
 This project is licensed under the GNU General Public License v3.0. See the LICENSE file for details.
-
-Although I (robinpie) personally don't really like the GPLv3, this project links to both Apache 2.0 code (notcurses) and GPLv2+ code (GPM), so GPLv3 is our only option.
