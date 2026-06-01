@@ -77,6 +77,14 @@ static char *trim(char *s)
 #define CFG_MANUAL_HDR "# manual configuration:"
 #define CFG_INAPP_HDR  "# in-app/automatically set configuration:"
 
+/* Markers are matched by prefix (after trimming) so trailing content on the
+ * marker line — e.g. "# manual configuration: (your settings)" — still flags
+ * the section instead of being silently swallowed into the wrong block. */
+static bool is_marker(const char *line, const char *marker)
+{
+    return strncmp(line, marker, strlen(marker)) == 0;
+}
+
 /* Apply one parsed key/value pair to cfg. Returns false for unknown keys or
  * malformed values. line is supplied only for diagnostics. */
 static bool config_apply(VpConfig *cfg, const char *key, char *val, int line)
@@ -415,15 +423,15 @@ void config_load(VpConfig *cfg)
         snprintf(tmp, sizeof(tmp), "%s", buf);
         const char *t = trim(tmp);
 
-        if (strcmp(t, CFG_INAPP_HDR) == 0) {
+        if (is_marker(t, CFG_INAPP_HDR)) {
             sec = 1; saw_marker = true; continue; /* markers aren't captured/applied */
         }
-        if (strcmp(t, CFG_MANUAL_HDR) == 0) {
+        if (is_marker(t, CFG_MANUAL_HDR)) {
             sec = 2; saw_marker = true; continue;
         }
 
         if (sec == 0) {
-            if (strcmp(t, CFG_TOP_HDR) != 0) {
+            if (!is_marker(t, CFG_TOP_HDR)) {
                 pre = buf_append(pre, &prelen, &precap, buf);
             }
         } else if (sec == 2) {

@@ -76,19 +76,20 @@ void wm_set_mouse_pos(WM *wm, int y, int x)
     wm->mouse_x = x;
 }
 
-void wm_add_window(WM *wm, Window *win)
+bool wm_add_window(WM *wm, Window *win)
 {
     if (wm->nwins == wm->cap) {
         int ncap = wm->cap ? wm->cap * 2 : 8;
         Window **n = realloc(wm->wins, (size_t)ncap * sizeof(*n));
         if (!n) {
-            return;
+            return false; /* caller owns `win` and must tear it down */
         }
         wm->wins = n;
         wm->cap = ncap;
     }
     wm->wins[wm->nwins++] = win;
     wm->taskbar_dirty = true;
+    return true;
 }
 
 void wm_remove_window(WM *wm, Window *win)
@@ -212,7 +213,12 @@ Window *wm_spawn_window(WM *wm)
     if (!win) {
         return NULL;
     }
-    wm_add_window(wm, win);
+    if (!wm_add_window(wm, win)) {
+        /* Couldn't grow the window list: destroy the orphan (plane + child)
+         * rather than leak it and operate on an untracked window. */
+        window_destroy(wm, win);
+        return NULL;
+    }
     wm_clamp_onscreen(wm, win);
     wm_focus_window(wm, win);
     vp_log("spawn id=%d nwins=%d\n", win->id, wm->nwins);

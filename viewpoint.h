@@ -59,6 +59,11 @@
  * double-click (which toggles maximize). */
 #define VP_DBLCLICK_MS 400
 
+/* Minimum gap (milliseconds) between title re-derivations for one window.
+ * window_refresh_title polls /proc; this keeps a window streaming output from
+ * re-polling on every render pass. */
+#define VP_TITLE_POLL_MS 250
+
 /* ------------------------------------------------------------------------- */
 /* Global mode                                                               */
 /* ------------------------------------------------------------------------- */
@@ -153,6 +158,10 @@ typedef struct Window {
      * the vterm movecursor / settermprop callbacks */
     int currow, curcol;
     bool cursor_visible;
+
+    /* CLOCK_MONOTONIC (ns) before which window_refresh_title skips its /proc
+     * poll — throttles title updates to VP_TITLE_POLL_MS. */
+    uint64_t title_poll_ns;
 
     char title[VP_TITLE_MAX];
 } Window;
@@ -355,7 +364,9 @@ bool window_refresh_title(Window *win);
 /* ------------------------------------------------------------------------- */
 
 void wm_init(WM *wm, struct notcurses *nc);
-void wm_add_window(WM *wm, Window *win);
+/* Append win to the window list. Returns false if the list couldn't grow (OOM),
+ * in which case the caller still owns win and must destroy it. */
+bool wm_add_window(WM *wm, Window *win);
 void wm_remove_window(WM *wm, Window *win);
 int wm_index_of(WM *wm, const Window *win);
 Window *wm_focused(WM *wm);

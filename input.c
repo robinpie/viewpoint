@@ -181,10 +181,11 @@ static bool key_from_name(const char *name, uint32_t *id)
 static bool parse_chord(const char *str, uint32_t *id_out, unsigned *mods_out)
 {
     char buf[64];
-    if (strlen(str) >= sizeof(buf)) {
+    size_t len = strlen(str);
+    if (len >= sizeof(buf)) {
         return false;
     }
-    strcpy(buf, str);
+    memcpy(buf, str, len + 1); /* length already bounded above */
 
     unsigned mods = 0;
     char *tok = buf;
@@ -524,9 +525,19 @@ bool input_handle_key(WM *wm, const ncinput *ni)
 
     unsigned mods = eff_mods(ni);
 
+    /* Normalize the keypress to a chord id the keymap can match. The keymap
+     * stores letters lowercased (so SHIFT alone expresses the upper case), but
+     * notcurses uppercases ASCII letters whenever Ctrl or Shift is held (see
+     * vt_send_key) — so e.g. a bound shift+a / ctrl+a arrives as 'A'. Fold it
+     * back down exactly as the capture path does (keymap_chord_from_input). */
+    uint32_t id = ni->id;
+    if (id < 0x80 && isalpha((int)id)) {
+        id = (uint32_t)tolower((int)id);
+    }
+
     const VpConfig *cfg = &wm->config;
     for (int i = 0; i < cfg->nkeys; i++) {
-        if (cfg->keymap[i].id == ni->id && cfg->keymap[i].mods == mods) {
+        if (cfg->keymap[i].id == id && cfg->keymap[i].mods == mods) {
             do_action(wm, cfg->keymap[i].act);
             return true;
         }
@@ -966,6 +977,15 @@ static void mouse_release(WM *wm, int btn, int y, int x, unsigned mods)
             snap_geom(wm, wm->snap_preview, &gx, &gy, &gw, &gh);
             win->maximized = false;
             window_set_geometry(win, gx, gy, gw, gh);
+        }
+    } else if (wm->drag == DRAG_MOVE) {
+        /* Plain (non-snap) drop: re-clamp on-screen so a window dragged toward
+         * an edge can't be stranded with only a sliver visible. The live drag
+         * intentionally allows it to overhang; the drop pulls it back, matching
+         * the keyboard move path (wm_move_focused -> wm_clamp_onscreen). */
+        Window *win = find_by_id(wm, wm->drag_win);
+        if (win) {
+            wm_clamp_onscreen(wm, win);
         }
     } else if (wm->drag == DRAG_CONTENT) {
         content_forward(find_by_id(wm, wm->drag_win), MEV_RELEASE, btn, y, x, mods);

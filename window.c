@@ -33,6 +33,7 @@
 #include <unistd.h>
 #include <pwd.h>
 #include <limits.h>
+#include <time.h>
 
 /* Border/title-bar colors. */
 #define COL_FOCUS_FG   0xff, 0xff, 0xff
@@ -209,11 +210,28 @@ static void proc_cwd(pid_t pid, char *out, size_t outlen)
  * program's name, or — when the shell itself is in the foreground (idle at its
  * prompt) — user@host:cwd. Returns true if the title changed (so callers can
  * refresh the frame/taskbar). */
+static uint64_t mono_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
 bool window_refresh_title(Window *win)
 {
     if (win->pty < 0 || win->child <= 0) {
         return false;
     }
+
+    /* Deriving the title hits /proc (tcgetpgrp + readlink/fopen). wm_render
+     * calls this for every window on every pass, so throttle each window to at
+     * most one poll per VP_TITLE_POLL_MS — otherwise a window streaming output
+     * (which renders constantly) would re-poll /proc on every frame. */
+    uint64_t now = mono_ns();
+    if (now < win->title_poll_ns) {
+        return false;
+    }
+    win->title_poll_ns = now + (uint64_t)VP_TITLE_POLL_MS * 1000000ull;
 
     /* Foreground process group of the slave terminal; its pgid is the leader's
      * pid, which equals the shell's pid exactly when no command is running. */
@@ -255,11 +273,17 @@ bool window_refresh_title(Window *win)
         snprintf(next, sizeof(next), "%s", comm);
     }
 
-    if (strncmp(next, win->title, sizeof(win->title)) == 0) {
+    /* Truncate to the stored title's capacity *before* comparing: win->title
+     * already holds a truncated copy, so comparing the untruncated `next`
+     * against it would report a spurious change every call once the title
+     * exceeds VP_TITLE_MAX (e.g. a deep cwd), dirtying the frame/taskbar
+     * needlessly on every render. */
+    char fitted[VP_TITLE_MAX];
+    snprintf(fitted, sizeof(fitted), "%.*s", (int)sizeof(fitted) - 1, next);
+    if (strcmp(fitted, win->title) == 0) {
         return false;
     }
-    snprintf(win->title, sizeof(win->title), "%.*s",
-             (int)sizeof(win->title) - 1, next);
+    memcpy(win->title, fitted, sizeof(fitted));
     win->frame_dirty = true;
     return true;
 }
