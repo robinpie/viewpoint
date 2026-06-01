@@ -65,6 +65,7 @@ These are the default chords active in INTERPRET mode.
 | Click the taskbar mode region                 | Toggle global mode                       |
 | Click the `⚙ Settings` icon (desktop top-left)| Open the settings menu                   |
 | Click the `⏻ Exit` icon (desktop bottom-right)| Quit viewpoint                           |
+| Drag a desktop icon (`⚙` / `⏻`)               | Move it; its position is remembered across restarts |
 
 ## Configuration
 
@@ -110,6 +111,11 @@ unbind = alt+f4
 
 # Change the always-on mode-toggle key (default f12):
 toggle = f12
+
+# Pin a desktop icon's top-left corner:  icon = <name> <x> <y>
+# (names: settings, exit. Normally written automatically when you drag an icon.)
+icon = settings 1 1
+icon = exit 60 20
 ```
 
 A chord is an optional `alt+`/`shift+`/`ctrl+` modifier prefix followed by a key: a single character (`n`, `x`), a function key (`f1`…`f60`), or a named key (`tab`, `enter`, `esc`, `space`, `left`/`right`/`up`/`down`, `home`, `end`, `pgup`, `pgdn`, `delete`, `insert`, `backspace`).

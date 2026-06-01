@@ -340,6 +340,7 @@ void wm_handle_resize(WM *wm)
     if (wm->taskbar) {
         taskbar_reflow(wm);
     }
+    settings_icon_reflow(wm); /* keep the launcher icon on-screen */
     exit_icon_reflow(wm); /* re-anchor to the new bottom-right corner */
     for (int i = 0; i < wm->nwins; i++) {
         Window *win = wm->wins[i];

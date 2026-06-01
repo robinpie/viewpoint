@@ -107,6 +107,13 @@ typedef struct VpConfig {
 
     uint32_t toggle_key; /* the always-on INTERPRET↔PASSTHROUGH key */
 
+    /* Desktop launcher icon positions (top-left cell), as stored in the config.
+     * -1 means "unset": fall back to the built-in placement (Settings: top-left;
+     * Exit: auto-anchored to the bottom-right). Set once the user drags an icon,
+     * and written back to the in-app config section by config_save(). */
+    int settings_icon_y, settings_icon_x;
+    int exit_icon_y, exit_icon_x;
+
     /* Verbatim text of the file's hand-written "manual" section, captured at
      * load. config_save() preserves it untouched and only rewrites the
      * app-managed section below it. NULL if there was none. */
@@ -159,6 +166,7 @@ typedef enum {
     DRAG_MOVE,
     DRAG_RESIZE,
     DRAG_CONTENT, /* button held over a window's content; route to the app */
+    DRAG_ICON,    /* a desktop launcher icon (Settings / Exit) is being dragged */
 } vp_dragkind;
 
 /* Resize-edge bitmask. The top edge is the title bar (drag = move), but its
@@ -241,6 +249,12 @@ typedef struct WM {
     int drag_ay;        /* anchor: original bottom row (for top-edge resize) */
     vp_snapzone snap_preview; /* currently-shown snap outline */
     struct ncplane *snap_plane;
+
+    /* Desktop-icon drag (DRAG_ICON). drag_off_{x,y} hold the grab offset within
+     * the tile; drag_icon_{y,x}0 are the tile's top-left at grab time, so a
+     * release that didn't move it can be treated as a plain click instead. */
+    struct ncplane *drag_icon;
+    int drag_icon_y0, drag_icon_x0;
 
     /* Title-bar double-click tracking (double-click toggles maximize). */
     uint64_t last_titleclick_ns; /* CLOCK_MONOTONIC of the last move-region click */
@@ -415,6 +429,9 @@ void keymap_unbind_action(VpConfig *cfg, vp_action act);
 
 /* Create the desktop launcher icon (kept just above the background). */
 void settings_init(WM *wm);
+/* Re-clamp the launcher icon onto the screen after a resize (and honor a
+ * user-dragged position stored in the config). */
+void settings_icon_reflow(WM *wm);
 /* Open / close the modal keybinding editor. Closing persists to the config. */
 void settings_open(WM *wm);
 void settings_close(WM *wm);

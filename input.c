@@ -719,6 +719,28 @@ static uint64_t now_ns(void)
 
 static void update_drag(WM *wm, int y, int x)
 {
+    /* Desktop-icon drag: just slide the tile under the pointer, clamped on the
+     * screen. Handled before the window lookup below, which doesn't apply. */
+    if (wm->drag == DRAG_ICON) {
+        struct ncplane *icon = wm->drag_icon;
+        if (!icon) {
+            wm->drag = DRAG_NONE;
+            return;
+        }
+        unsigned ih, iw;
+        ncplane_dim_yx(icon, &ih, &iw);
+        int ny = y - wm->drag_off_y;
+        int nx = x - wm->drag_off_x;
+        int maxy = (int)wm->scr_rows - (wm->taskbar ? 1 : 0) - (int)ih;
+        int maxx = (int)wm->scr_cols - (int)iw;
+        if (ny > maxy) ny = maxy;
+        if (nx > maxx) nx = maxx;
+        if (ny < 0) ny = 0;
+        if (nx < 0) nx = 0;
+        ncplane_move_yx(icon, ny, nx);
+        return;
+    }
+
     Window *win = find_by_id(wm, wm->drag_win);
     if (!win) {
         wm->drag = DRAG_NONE;
@@ -795,12 +817,24 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
     }
     Window *win = wm_window_at(wm, y, x);
     if (!win) {
-        /* Empty desktop: maybe a launcher icon was clicked. */
+        /* Empty desktop: a launcher icon may have been grabbed. Begin a drag;
+         * a release that never moved it is treated as a plain click (which then
+         * opens settings / quits — see mouse_release). */
+        struct ncplane *icon = NULL;
         if (settings_icon_hit(wm, y, x)) {
-            settings_open(wm);
+            icon = wm->settings.icon;
         } else if (exit_icon_hit(wm, y, x)) {
-            wm->should_quit = true;
-            vp_log("exit: requested via desktop icon\n");
+            icon = wm->exit_icon;
+        }
+        if (icon) {
+            int ay, ax;
+            ncplane_abs_yx(icon, &ay, &ax);
+            wm->drag = DRAG_ICON;
+            wm->drag_icon = icon;
+            wm->drag_icon_y0 = ay;
+            wm->drag_icon_x0 = ax;
+            wm->drag_off_y = y - ay;
+            wm->drag_off_x = x - ax;
         }
         return;
     }
@@ -874,6 +908,38 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
 
 static void mouse_release(WM *wm, int btn, int y, int x, unsigned mods)
 {
+    /* Desktop-icon drop. Apply the final position, then: if the tile actually
+     * moved, persist its new spot to the config; otherwise the press+release was
+     * a plain click, so run the icon's normal action. */
+    if (wm->drag == DRAG_ICON) {
+        struct ncplane *icon = wm->drag_icon;
+        update_drag(wm, y, x);
+        int ay = wm->drag_icon_y0, ax = wm->drag_icon_x0;
+        if (icon) {
+            ncplane_abs_yx(icon, &ay, &ax);
+        }
+        bool moved = (ay != wm->drag_icon_y0 || ax != wm->drag_icon_x0);
+        if (moved) {
+            if (icon == wm->settings.icon) {
+                wm->config.settings_icon_y = ay;
+                wm->config.settings_icon_x = ax;
+            } else if (icon == wm->exit_icon) {
+                wm->config.exit_icon_y = ay;
+                wm->config.exit_icon_x = ax;
+            }
+            config_save(&wm->config);
+            vp_log("icon: moved to y=%d x=%d (saved)\n", ay, ax);
+        } else if (icon == wm->settings.icon) {
+            settings_open(wm);
+        } else if (icon == wm->exit_icon) {
+            wm->should_quit = true;
+            vp_log("exit: requested via desktop icon\n");
+        }
+        wm->drag = DRAG_NONE;
+        wm->drag_icon = NULL;
+        return;
+    }
+
     /* Apply the final move/resize from the release position. Terminals that
      * report button-held motion (drag) have already been updating live; those
      * that report only press+release (e.g. Konsole) get the whole drag applied

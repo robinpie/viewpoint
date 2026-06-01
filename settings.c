@@ -46,6 +46,18 @@
 
 /* ----- small helpers ----------------------------------------------------- */
 
+/* Clamp a desktop icon's top-left (y,x) so the whole h×w tile stays on-screen
+ * and above the taskbar row. */
+static void clamp_icon_pos(const WM *wm, int h, int w, int *y, int *x)
+{
+    int maxy = (int)wm->scr_rows - (wm->taskbar ? 1 : 0) - h;
+    int maxx = (int)wm->scr_cols - w;
+    if (*y > maxy) *y = maxy;
+    if (*x > maxx) *x = maxx;
+    if (*y < 0) *y = 0;
+    if (*x < 0) *x = 0;
+}
+
 static int total_rows(void)        { return keymap_action_count() + 1; }
 static bool is_toggle_row(int r)   { return r == keymap_action_count(); }
 
@@ -93,11 +105,29 @@ static void clamp_scroll(WM *wm)
 
 /* ----- the desktop launcher icon ----------------------------------------- */
 
+/* Resting top-left of the Settings tile: a user-dragged position from the
+ * config if there is one, otherwise the built-in top-left corner. Always
+ * clamped onto the current screen. */
+static void settings_icon_geom(const WM *wm, int *y, int *x)
+{
+    if (wm->config.settings_icon_y >= 0) {
+        *y = wm->config.settings_icon_y;
+        *x = wm->config.settings_icon_x;
+    } else {
+        *y = ICON_Y;
+        *x = ICON_X;
+    }
+    clamp_icon_pos(wm, ICON_H, ICON_W, y, x);
+}
+
 void settings_init(WM *wm)
 {
+    int iy, ix;
+    settings_icon_geom(wm, &iy, &ix);
+
     ncplane_options o = {0};
-    o.y = ICON_Y;
-    o.x = ICON_X;
+    o.y = iy;
+    o.x = ix;
     o.rows = ICON_H;
     o.cols = ICON_W;
     wm->settings.icon = ncplane_create(wm->std, &o);
@@ -138,6 +168,16 @@ void settings_init(WM *wm)
     ncplane_putstr_yx(p, 2, 2, "Settings");
 }
 
+void settings_icon_reflow(WM *wm)
+{
+    if (!wm->settings.icon) {
+        return;
+    }
+    int iy, ix;
+    settings_icon_geom(wm, &iy, &ix);
+    ncplane_move_yx(wm->settings.icon, iy, ix);
+}
+
 bool settings_icon_hit(WM *wm, int y, int x)
 {
     struct ncplane *p = wm->settings.icon;
@@ -159,15 +199,20 @@ bool settings_icon_hit(WM *wm, int y, int x)
 #define EXIT_W 12
 #define EXIT_H 4
 
-/* Bottom-right, one cell in from the right edge, with a one-row gap above the
- * taskbar (the taskbar occupies the last row). */
+/* Resting top-left of the Exit tile. If the user dragged it, the stored config
+ * position wins; otherwise it auto-anchors to the bottom-right, one cell in from
+ * the right edge with a one-row gap above the taskbar. Always clamped on-screen. */
 static void exit_icon_geom(const WM *wm, int *y, int *x)
 {
-    int bottom = (int)wm->scr_rows - (wm->taskbar ? 1 : 0); /* first row below us */
-    *y = bottom - EXIT_H - 1; /* leave a blank row between the icon and taskbar */
-    *x = (int)wm->scr_cols - EXIT_W - 1;
-    if (*y < 0) *y = 0;
-    if (*x < 0) *x = 0;
+    if (wm->config.exit_icon_y >= 0) {
+        *y = wm->config.exit_icon_y;
+        *x = wm->config.exit_icon_x;
+    } else {
+        int bottom = (int)wm->scr_rows - (wm->taskbar ? 1 : 0); /* first row below us */
+        *y = bottom - EXIT_H - 1; /* leave a blank row between the icon and taskbar */
+        *x = (int)wm->scr_cols - EXIT_W - 1;
+    }
+    clamp_icon_pos(wm, EXIT_H, EXIT_W, y, x);
 }
 
 void exit_icon_init(WM *wm)
@@ -213,9 +258,10 @@ void exit_icon_init(WM *wm)
     ncplane_set_fg_rgb8(p, 0xff, 0x9a, 0x9a);
     ncplane_putegc_yx(p, 1, EXIT_W / 2 - 1, "⏻", NULL);
 
-    /* Label beneath it. */
+    /* Label beneath it, centered in the tile. */
     ncplane_set_fg_rgb8(p, 0xff, 0xff, 0xff);
-    ncplane_putstr_yx(p, 2, 2, "Exit");
+    static const char label[] = "Exit";
+    ncplane_putstr_yx(p, 2, (EXIT_W - (int)(sizeof(label) - 1)) / 2, label);
 }
 
 void exit_icon_reflow(WM *wm)

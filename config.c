@@ -101,6 +101,26 @@ static bool config_apply(VpConfig *cfg, const char *key, char *val, int line)
     if (strcmp(key, "toggle") == 0) {
         return keymap_set_toggle(cfg, val);
     }
+    if (strcmp(key, "icon") == 0) {
+        /* value is "<name> <x> <y>" — a desktop launcher icon's top-left cell */
+        char name[16];
+        int x, y;
+        if (sscanf(val, "%15s %d %d", name, &x, &y) != 3) {
+            vp_log("config: line %d: icon needs '<name> <x> <y>'\n", line);
+            return false;
+        }
+        if (strcmp(name, "settings") == 0) {
+            cfg->settings_icon_x = x;
+            cfg->settings_icon_y = y;
+        } else if (strcmp(name, "exit") == 0) {
+            cfg->exit_icon_x = x;
+            cfg->exit_icon_y = y;
+        } else {
+            vp_log("config: line %d: unknown icon '%s'\n", line, name);
+            return false;
+        }
+        return true;
+    }
     vp_log("config: line %d: unknown key '%s'\n", line, key);
     return false;
 }
@@ -174,6 +194,9 @@ void config_defaults(VpConfig *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
     keymap_load_defaults(cfg);
+    /* -1 = "unset": use each icon's built-in default placement. */
+    cfg->settings_icon_y = cfg->settings_icon_x = -1;
+    cfg->exit_icon_y     = cfg->exit_icon_x     = -1;
 }
 
 void config_free(VpConfig *cfg)
@@ -227,6 +250,21 @@ static void write_inapp_diff(FILE *f, const VpConfig *cfg, const VpConfig *base)
     if (cfg->toggle_key != base->toggle_key) {
         keymap_format_chord(cfg->toggle_key, 0, chord, sizeof(chord));
         fprintf(f, "toggle = %s\n", chord);
+    }
+
+    /* Desktop icon positions, only when set and differing from the baseline (so
+     * a position already pinned by the manual section isn't echoed here). */
+    if (cfg->settings_icon_y >= 0 &&
+        (cfg->settings_icon_y != base->settings_icon_y ||
+         cfg->settings_icon_x != base->settings_icon_x)) {
+        fprintf(f, "icon = settings %d %d\n",
+                cfg->settings_icon_x, cfg->settings_icon_y);
+    }
+    if (cfg->exit_icon_y >= 0 &&
+        (cfg->exit_icon_y != base->exit_icon_y ||
+         cfg->exit_icon_x != base->exit_icon_x)) {
+        fprintf(f, "icon = exit %d %d\n",
+                cfg->exit_icon_x, cfg->exit_icon_y);
     }
 
     /* Chords present in base but gone from the live keymap: unbind them. */
