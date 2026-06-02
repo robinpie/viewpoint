@@ -1,6 +1,8 @@
 viewpoint is a terminal multiplexer with a desktop-window-manager metaphor for Linux.
 
-viewpoint presents floating windows in a WIMPy interface on your terminal. Each window runs its own shell (or any program) in a dedicated PTY, but with the amazing 1990s innovations in window chrome: draggable borders, a title bar with minimize/maximize/close buttons, a desktop background, and a taskbar. You move, resize, raise, snap, minimize and maximize windows with the mouse or keyboard, similarly as on a graphical desktop.
+viewpoint presents floating windows in a WIMPy interface on your terminal. Each window runs its own shell (or any program) in a dedicated PTY, but with the amazing 1990s innovations in window chrome: draggable borders, a title bar with minimize/maximize/close buttons, and a taskbar. You move, resize, raise, snap, minimize and maximize windows with the mouse or keyboard, similarly as on a graphical desktop.
+
+Extremely early in development, things will change.
 
 ---
 
@@ -20,7 +22,7 @@ notcurses and libvterm are located via `pkg-config`. GPM is linked directly with
 ```sh
 ./viewpoint
 ```
-viewpoint expects to fully own the terminal. Running viewpoint inside another multiplexer will not work and is not supported. Running another multiplexer inside viewpoint *may* work but is not supported.
+viewpoint expects to fully own the terminal. Running viewpoint inside another multiplexer will not work and is not supported. I don't see any reason why running another multiplexer inside viewpoint shouldn't work, but that isn't formally supported either.
 
 ## Usage
 
@@ -37,7 +39,7 @@ We try to support all reasonably behaved terminals, but some deliver certain key
 
 ### Keymap
 
-These are the default keybinds. They are fully editable through an XDG-style config file or an in-app settings menu.
+These are the default keybinds. They are fully editable through an in-app settings menu, or manually editing an XDG-style config file that it generates.
 
 | Key                           | Action                                   |
 |-------------------------------|------------------------------------------|
@@ -65,9 +67,8 @@ These are the default keybinds. They are fully editable through an XDG-style con
 | Click a taskbar slot                          | Focus, or restore if minimized           |
 | Horizontal scroll / click the `◄` `►` arrows  | Scroll the taskbar when more windows are open than fit |
 | Click the taskbar mode region                 | Toggle global mode                       |
-| Click the `⚙ Settings` icon (desktop top-left)| Open the settings menu                   |
-| Click the `⏻ Exit` icon (desktop bottom-right)| Quit viewpoint                           |
-| Drag a desktop icon (`⚙` / `⏻`)               | Move it; its position is remembered across restarts |
+| Click a desktop icon                          | Perform the corresponding action         |
+| Drag a desktop icon                           | Move it; its position is remembered in the config file |
 
 ## Configuration
 
