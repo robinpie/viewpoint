@@ -20,7 +20,7 @@ notcurses and libvterm are located via `pkg-config`. GPM is linked directly with
 ```sh
 ./viewpoint
 ```
-viewpoint expects to fully own the terminal. Running viewpoint inside another multiplexer will not work and is not supported. I don't see any reason why running another multiplexer inside viewpoint shouldn't work, but that isn't formally supported either.
+viewpoint expects to fully own the terminal. Running viewpoint inside another multiplexer will not work and is not supported. I don't see any reason why running another multiplexer _inside_ viewpoint shouldn't work, but that isn't formally supported either.
 
 ## Usage
 
