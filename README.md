@@ -4,8 +4,6 @@ viewpoint presents floating windows in a WIMPy interface on your terminal. Each 
 
 Extremely early in development, things will change.
 
----
-
 ## Build and dependencies
 
 ```sh
