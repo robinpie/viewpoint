@@ -47,6 +47,15 @@
 
 #define VP_TITLE_MAX 128
 
+/* Per-window scrollback defaults: how many lines that scroll off the top are
+ * retained, and how many lines a single mouse-wheel notch scrolls the history
+ * view. Both are overridable via the config file / in-app Terminal settings;
+ * these are just the starting values, and the bounds the editor clamps to. */
+#define VP_SCROLLBACK_MAX 2000
+#define VP_SCROLL_STEP 3
+#define VP_SCROLLBACK_LIMIT 100000 /* upper bound on retained lines */
+#define VP_SCROLL_STEP_MAX 50      /* upper bound on the wheel notch size */
+
 /* Off-screen parking row for hidden planes (minimized windows, idle snap
  * preview). Far below any real screen. */
 #define VP_HIDDEN_Y 100000
@@ -86,6 +95,9 @@ typedef enum {
     ACT_FOCUS_NEXT, ACT_FOCUS_PREV, ACT_CLOSE, ACT_NEW, ACT_MIN, ACT_MAXTOGGLE,
     ACT_MOVE_L, ACT_MOVE_R, ACT_MOVE_U, ACT_MOVE_D,
     ACT_RESIZE_L, ACT_RESIZE_R, ACT_RESIZE_U, ACT_RESIZE_D,
+    /* Scroll the focused window's scrollback view back / forward through its
+     * retained history. */
+    ACT_SCROLL_UP, ACT_SCROLL_DOWN,
     /* Focus/restore the window in taskbar slot N. Kept contiguous (slot N is
      * ACT_SLOT_1 + (N-1)) so the dispatcher can recover the slot index. */
     ACT_SLOT_1, ACT_SLOT_2, ACT_SLOT_3, ACT_SLOT_4, ACT_SLOT_5,
@@ -114,6 +126,12 @@ typedef struct VpConfig {
 
     uint32_t toggle_key; /* the always-on INTERPRET↔PASSTHROUGH key */
 
+    /* Terminal behavior. scrollback_max is the per-window history cap (lines);
+     * scroll_step is how many lines one mouse-wheel notch scrolls. Both seed
+     * from the VP_* defaults and are editable in-app (Terminal settings). */
+    int scrollback_max;
+    int scroll_step;
+
     /* Desktop launcher icon positions (top-left cell), as stored in the config.
      * -1 means "unset": fall back to the built-in placement (Settings: top-left;
      * Exit: auto-anchored to the bottom-right). Set once the user drags an icon,
@@ -127,9 +145,27 @@ typedef struct VpConfig {
     char *manual_text;
 } VpConfig;
 
+/* Scalar (single-value) settings the in-app panels can change and the manual
+ * config section may therefore shadow. To make a new in-app setting honor the
+ * manual-shadow warning, add a value here and one comparison line in config.c's
+ * setting_differs(); config_manual_shadows_setting() then covers it. */
+typedef enum {
+    SETTING_TOGGLE_KEY,
+    SETTING_SCROLLBACK,
+    SETTING_SCROLL_STEP,
+} vp_setting;
+
 /* ------------------------------------------------------------------------- */
 /* Window                                                                    */
 /* ------------------------------------------------------------------------- */
+
+/* One retained scrollback line: a heap copy of the cells that scrolled off the
+ * top of a window, plus how many of them were valid (the window's width at the
+ * time, which may differ from its current width). */
+typedef struct sb_line {
+    VTermScreenCell *cells;
+    int cols;
+} sb_line;
 
 typedef struct Window {
     int id;             /* stable, monotonic per session */
@@ -160,6 +196,15 @@ typedef struct Window {
      * the vterm movecursor / settermprop callbacks */
     int currow, curcol;
     bool cursor_visible;
+
+    /* Scrollback ring: lines that scrolled off the top, oldest..newest. Lazily
+     * allocated on the first push. sb_offset is how many lines the view is
+     * scrolled up into history (0 = the live screen). See vt_bridge.c. */
+    sb_line *sb;
+    int sb_cap, sb_count, sb_head;
+    int sb_offset;
+    int sb_max;        /* logical history cap for this window (from config) */
+    bool app_mouse;   /* the inner app enabled mouse reporting (VTERM_PROP_MOUSE) */
 
     /* CLOCK_MONOTONIC (ns) before which window_refresh_title skips its /proc
      * poll - throttles title updates to VP_TITLE_POLL_MS. */
@@ -203,6 +248,7 @@ typedef enum {
 typedef enum {
     SETTINGS_VIEW_GRID = 0,  /* Control-Panel tile grid (landing page) */
     SETTINGS_VIEW_KEYBINDINGS,
+    SETTINGS_VIEW_TERMINAL,  /* scrollback size / scroll step */
 } settings_view;
 
 /* In-app settings. A modal panel opened from a desktop launcher icon; while open
@@ -311,12 +357,14 @@ void config_free(VpConfig *cfg);
  * directory if needed). Overwrites the file. Returns false on I/O error. */
 bool config_save(const VpConfig *cfg);
 
-/* True if a binding just changed in-app would be overridden by the manual
- * config section on the next load (so the change won't fully persist). With
- * is_toggle=true it checks the toggle key; otherwise it checks whether the
- * manual section governs action `act` or the chord (id,mods). */
-bool config_manual_shadows(const VpConfig *live, bool is_toggle,
-                           vp_action act, uint32_t id, unsigned mods);
+/* True if an in-app change would be overridden by the manual config section on
+ * the next load (so the change won't fully persist). The *_setting form checks
+ * a scalar setting (the manual section assigns it a non-default value); the
+ * *_action form checks whether the manual section governs keybinding action
+ * `act` or the chord (id,mods) being assigned to it. */
+bool config_manual_shadows_setting(const VpConfig *live, vp_setting setting);
+bool config_manual_shadows_action(const VpConfig *live, vp_action act,
+                                   uint32_t id, unsigned mods);
 
 /* ------------------------------------------------------------------------- */
 /* pty.c                                                                     */
@@ -346,6 +394,14 @@ void vt_render(Window *w);
 
 /* Resize the emulator + content plane to the window's current grid dims. */
 void vt_resize(Window *w, int rows, int cols);
+
+/* Scroll the scrollback view by delta lines (+ = back into history, - = toward
+ * the live screen). Clamped to [0, retained lines]; marks the window dirty. */
+void vt_scroll(Window *w, int delta);
+
+/* Set the window's scrollback line cap, repacking/trimming its retained history
+ * to fit (dropping the oldest lines when shrinking). max <= 0 disables it. */
+void vt_set_scrollback_max(Window *w, int max);
 
 /* Send a key / unicode codepoint to the child (encodes via libvterm). */
 void vt_key_unichar(Window *w, uint32_t c, VTermModifier mod);

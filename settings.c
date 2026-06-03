@@ -19,10 +19,10 @@
  *
  * A small launcher "icon" sits on the desktop (top-left, just above the
  * background). Clicking it opens a modal panel that lands on a Control-Panel
- * grid of tiles; each tile opens a sub-view. Currently the only populated tile
- * is "Keybindings", which opens the keybinding editor (the rest are empty
- * placeholders, ready for future settings). While the panel is open it captures
- * all keyboard/mouse input (see the hooks in input.c).
+ * grid of tiles; each tile opens a sub-view. Populated tiles are "Keybindings"
+ * (the keybinding editor) and "Terminal" (scrollback size / scroll step); the
+ * rest are empty placeholders, ready for future settings. While the panel is
+ * open it captures all keyboard/mouse input (see the hooks in input.c).
  *
  * Keybinding editor: select a row (↑/↓ or click) and press Enter - the next
  * chord you press is bound to that action live. Esc returns to the grid; Esc on
@@ -33,6 +33,7 @@
 #define _GNU_SOURCE
 #include "viewpoint.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -70,8 +71,40 @@ typedef struct {
 
 static const grid_entry g_grid_entries[] = {
     { "⌨", "Keybindings", SETTINGS_VIEW_KEYBINDINGS },
+    { "▤", "Terminal",    SETTINGS_VIEW_TERMINAL },
 };
 #define GRID_ENTRY_COUNT ((int)(sizeof(g_grid_entries) / sizeof(g_grid_entries[0])))
+
+/* ----- the Terminal view's rows -----
+ * A data-driven list of integer settings. Each row points at a VpConfig field
+ * (by offset, so it works against any WM's config), carries its bounds/step and
+ * the vp_setting it maps to (for the manual-shadow warning), and an optional
+ * live-apply hook. Adding a numeric Terminal setting is one row here plus its
+ * config plumbing - the editor UI, clamping, and shadow warning all follow. */
+typedef struct {
+    const char *label;
+    vp_setting  setting;       /* for config_manual_shadows_setting() */
+    size_t      field_off;     /* offsetof(VpConfig, <int field>) */
+    int         min, max, step;
+    const char *zero_label;    /* shown in place of "0" (e.g. "off"), or NULL */
+    void      (*on_change)(WM *); /* live-apply to open windows, or NULL */
+} term_row;
+
+static void term_apply_scrollback(WM *wm); /* defined below */
+
+static const term_row g_term_rows[] = {
+    { "Scrollback lines",    SETTING_SCROLLBACK,  offsetof(VpConfig, scrollback_max),
+      0, VP_SCROLLBACK_LIMIT, 100, "off", term_apply_scrollback },
+    { "Scroll step (lines)", SETTING_SCROLL_STEP, offsetof(VpConfig, scroll_step),
+      1, VP_SCROLL_STEP_MAX,    1, NULL,  NULL },
+};
+#define TERM_ROWS ((int)(sizeof(g_term_rows) / sizeof(g_term_rows[0])))
+
+/* The VpConfig int field backing row `i`. */
+static int *term_field(WM *wm, int i)
+{
+    return (int *)((char *)&wm->config + g_term_rows[i].field_off);
+}
 
 /* ----- small helpers ----------------------------------------------------- */
 
@@ -114,7 +147,9 @@ static void panel_geom(const WM *wm, int *y, int *x, int *h, int *w)
     } else {
         W = PANEL_W;
         if (W < 24) W = 24;
-        H = total_rows() + PANEL_CHROME;
+        int rows = (wm->settings.view == SETTINGS_VIEW_TERMINAL)
+                       ? TERM_ROWS : total_rows();
+        H = rows + PANEL_CHROME;
         if (H < PANEL_CHROME + 1) H = PANEL_CHROME + 1;
     }
     if (W > (int)wm->scr_cols - 2) W = (int)wm->scr_cols - 2;
@@ -394,6 +429,11 @@ static void settings_set_view(WM *wm, settings_view v)
         s->scroll = 0;
         snprintf(s->status, sizeof(s->status),
                  "Enter: rebind   D: unbind   S: save   Esc: back");
+    } else if (v == SETTINGS_VIEW_TERMINAL) {
+        s->sel = 0;
+        s->scroll = 0;
+        snprintf(s->status, sizeof(s->status),
+                 "←/→: adjust   S: save   Esc: back");
     } else {
         snprintf(s->status, sizeof(s->status),
                  "↑/↓/←/→: select   Enter: open   Esc: close");
@@ -450,7 +490,7 @@ static void apply_capture(WM *wm, uint32_t id, unsigned mods)
 
     if (is_toggle_row(s->sel)) {
         wm->config.toggle_key = id; /* modifiers ignored for the toggle */
-        if (config_manual_shadows(&wm->config, true, 0, id, mods)) {
+        if (config_manual_shadows_setting(&wm->config, SETTING_TOGGLE_KEY)) {
             snprintf(s->status, sizeof(s->status),
                      "Toggle set to %s - your manual config overrides it on restart", cb);
         } else {
@@ -461,7 +501,7 @@ static void apply_capture(WM *wm, uint32_t id, unsigned mods)
         const char *label = NULL;
         keymap_action_info(s->sel, &act, &label);
         keymap_rebind_action(&wm->config, act, id, mods);
-        if (config_manual_shadows(&wm->config, false, act, id, mods)) {
+        if (config_manual_shadows_action(&wm->config, act, id, mods)) {
             snprintf(s->status, sizeof(s->status),
                      "%s = %s - your manual config overrides it on restart",
                      label ? label : "", cb);
@@ -483,13 +523,53 @@ static void do_unbind(WM *wm)
         const char *label = NULL;
         keymap_action_info(s->sel, &act, &label);
         keymap_unbind_action(&wm->config, act);
-        if (config_manual_shadows(&wm->config, false, act, 0, 0)) {
+        if (config_manual_shadows_action(&wm->config, act, 0, 0)) {
             snprintf(s->status, sizeof(s->status),
                      "%s unbound - your manual config rebinds it on restart",
                      label ? label : "");
         } else {
             snprintf(s->status, sizeof(s->status), "%s unbound", label ? label : "");
         }
+    }
+    s->dirty = true;
+}
+
+/* Push the live scrollback cap to every open window, trimming history to fit. */
+static void term_apply_scrollback(WM *wm)
+{
+    for (int i = 0; i < wm->nwins; i++) {
+        vt_set_scrollback_max(wm->wins[i], wm->config.scrollback_max);
+    }
+}
+
+/* Nudge the Terminal-view setting on `row` by `dir` of its notches (clamped),
+ * apply it live, and report - warning when the manual config will shadow it. */
+static void term_adjust(WM *wm, int row, int dir)
+{
+    if (row < 0 || row >= TERM_ROWS) {
+        return;
+    }
+    const term_row *tr = &g_term_rows[row];
+    Settings *s = &wm->settings;
+    int *field = term_field(wm, row);
+
+    int v = *field + dir * tr->step;
+    if (v < tr->min) v = tr->min;
+    if (v > tr->max) v = tr->max;
+    if (v != *field) {
+        *field = v;
+        if (tr->on_change) {
+            tr->on_change(wm);
+        }
+    }
+
+    if (config_manual_shadows_setting(&wm->config, tr->setting)) {
+        snprintf(s->status, sizeof(s->status),
+                 "%s - your manual config overrides it on restart", tr->label);
+    } else if (tr->zero_label && *field == 0) {
+        snprintf(s->status, sizeof(s->status), "%s = %s", tr->label, tr->zero_label);
+    } else {
+        snprintf(s->status, sizeof(s->status), "%s = %d", tr->label, *field);
     }
     s->dirty = true;
 }
@@ -535,6 +615,28 @@ static void settings_grid_key(WM *wm, const ncinput *ni)
     }
 }
 
+static void settings_terminal_key(WM *wm, const ncinput *ni)
+{
+    Settings *s = &wm->settings;
+    switch (ni->id) {
+    case NCKEY_UP:    if (s->sel > 0)             { s->sel--; s->dirty = true; } break;
+    case NCKEY_DOWN:  if (s->sel < TERM_ROWS - 1) { s->sel++; s->dirty = true; } break;
+    case NCKEY_LEFT:  case '-': case '_': term_adjust(wm, s->sel, -1); break;
+    case NCKEY_RIGHT: case '+': case '=': term_adjust(wm, s->sel, +1); break;
+    case 's': case 'S':
+        snprintf(s->status, sizeof(s->status),
+                 config_save(&wm->config) ? "Saved" : "Save failed (see VP_DEBUG)");
+        s->dirty = true;
+        break;
+    case NCKEY_ESC:
+    case 'q': case 'Q':
+        settings_back(wm);
+        break;
+    default:
+        break;
+    }
+}
+
 void settings_handle_key(WM *wm, const ncinput *ni)
 {
     Settings *s = &wm->settings;
@@ -544,6 +646,10 @@ void settings_handle_key(WM *wm, const ncinput *ni)
 
     if (s->view == SETTINGS_VIEW_GRID) {
         settings_grid_key(wm, ni);
+        return;
+    }
+    if (s->view == SETTINGS_VIEW_TERMINAL) {
+        settings_terminal_key(wm, ni);
         return;
     }
 
@@ -629,6 +735,16 @@ void settings_click(WM *wm, int btn, int y, int x)
         return;
     }
 
+    /* Terminal view: clicking a row selects it (adjust with ←/→ or the wheel). */
+    if (s->view == SETTINGS_VIEW_TERMINAL) {
+        int listrow = rely - 1; /* row 0 is the top border */
+        if (listrow >= 0 && listrow < TERM_ROWS) {
+            s->sel = listrow;
+            s->dirty = true;
+        }
+        return;
+    }
+
     /* Click on a list row: select it and start capturing immediately. */
     int listrow = rely - 1; /* row 0 is the top border */
     if (listrow >= 0 && listrow < viewport_rows(wm)) {
@@ -645,7 +761,14 @@ void settings_click(WM *wm, int btn, int y, int x)
 void settings_scroll(WM *wm, int dir)
 {
     Settings *s = &wm->settings;
-    if (!s->open || s->view != SETTINGS_VIEW_KEYBINDINGS) {
+    if (!s->open) {
+        return;
+    }
+    if (s->view == SETTINGS_VIEW_TERMINAL) {
+        term_adjust(wm, s->sel, dir < 0 ? +1 : -1); /* wheel up raises the value */
+        return;
+    }
+    if (s->view != SETTINGS_VIEW_KEYBINDINGS) {
         return;
     }
     s->sel += dir;
@@ -840,6 +963,40 @@ static void draw_keybindings(WM *wm, struct ncplane *p, int W, int H)
     ncplane_putstr_yx(p, H - 2, 2, hbuf);
 }
 
+/* ----- the Terminal settings view ---------------------------------------- */
+
+static void draw_terminal(WM *wm, struct ncplane *p, int W, int H)
+{
+    Settings *s = &wm->settings;
+    ncplane_erase(p);
+    draw_border(p, W, H, " Terminal ");
+
+    for (int i = 0; i < TERM_ROWS; i++) {
+        const term_row *tr = &g_term_rows[i];
+        int v = *term_field(wm, i);
+        char val[32];
+        if (tr->zero_label && v == 0) {
+            snprintf(val, sizeof(val), "%s", tr->zero_label);
+        } else {
+            snprintf(val, sizeof(val), "%d", v);
+        }
+        draw_row(p, 1 + i, W, tr->label, val, i == s->sel, false);
+    }
+
+    /* Status + hint lines (mirrors the keybinding editor's footer). */
+    ncplane_set_bg_rgb8(p, 0x1c, 0x1c, 0x28);
+    ncplane_set_fg_rgb8(p, 0xc0, 0xc0, 0x80);
+    char sbuf[128];
+    snprintf(sbuf, sizeof(sbuf), "%-*.*s", W - 4, W - 4, s->status);
+    ncplane_putstr_yx(p, H - 3, 2, sbuf);
+
+    ncplane_set_fg_rgb8(p, 0x80, 0x80, 0x90);
+    char hbuf[128];
+    snprintf(hbuf, sizeof(hbuf), "%-*.*s", W - 4, W - 4,
+             "↑/↓ select · ←/→ adjust · S save · Esc back");
+    ncplane_putstr_yx(p, H - 2, 2, hbuf);
+}
+
 void settings_render(WM *wm)
 {
     Settings *s = &wm->settings;
@@ -858,6 +1015,8 @@ void settings_render(WM *wm)
 
     if (s->view == SETTINGS_VIEW_GRID) {
         draw_grid(wm, p, W, H);
+    } else if (s->view == SETTINGS_VIEW_TERMINAL) {
+        draw_terminal(wm, p, W, H);
     } else {
         draw_keybindings(wm, p, W, H);
     }

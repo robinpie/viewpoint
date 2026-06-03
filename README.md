@@ -53,6 +53,7 @@ These are the default keybinds. They are fully editable through an in-app settin
 | `Alt`+`1` … `Alt`+`9`         | Focus / restore window in taskbar slot N |
 | `Alt`+`←`/`→`/`↑`/`↓`         | Move focused window                      |
 | `Alt`+`Shift`+`←`/`→`/`↑`/`↓` | Resize focused window                    |
+| `Shift`+`PgUp` / `Shift`+`PgDn` | Scroll the focused window's scrollback back / forward |
 | `Alt`+`,` / `Alt`+`.`         | Scroll the taskbar left / right (when more windows are open than fit) |
 
 ### Mouse
@@ -63,6 +64,7 @@ These are the default keybinds. They are fully editable through an in-app settin
 | Click `[_]` / `[▢]` / `[x]` title buttons     | Minimize / maximize / close              |
 | Drag the title bar                            | Move the window                          |
 | Drag a window border or corner                | Resize the window                        |
+| Scroll the wheel over a window                | Scroll its scrollback (forwarded to the app instead if it grabbed the mouse) |
 | Drag the title bar to a screen edge / corner  | Snap to half / quarter (outline preview shown; applied on release) |
 | Click a taskbar slot                          | Focus, or restore if minimized           |
 | Horizontal scroll / click the `◄` `►` arrows  | Scroll the taskbar when more windows are open than fit |
@@ -85,7 +87,13 @@ The `Keybindings` tile opens the keybinding editor. It lists every action with i
 - `D` to unbind the selected action
 - `S` to save now, `Esc` (or click outside the panel) to return to the grid
 
-If a change you make in the editor is also governed by your manual config section, the status line warns you, but the manual section wins, so that change won't survive a restart.
+The `Terminal` tile adjusts per-window scrollback behavior:
+
+- `↑`/`↓` (or click a row) to select a setting
+- `←`/`→` (or the mouse wheel) to adjust it — `Scrollback lines` (history retained per window; `0` disables it) and `Scroll step` (lines moved per wheel notch). Changes apply to open windows immediately.
+- `S` to save now, `Esc` (or click outside the panel) to return to the grid
+
+If a setting you change is also governed by your manual config section, the status line warns you, but the manual section wins, so that change won't survive a restart.
 
 ### Configuration file
 
@@ -115,6 +123,10 @@ unbind = alt+f4
 # Change the mode toggle key:
 toggle = f12
 
+# Terminal behavior:
+scrollback  = 2000   # per-window scrollback lines (0 disables it)
+scroll_step = 3      # lines scrolled per mouse-wheel notch
+
 # Pin a desktop icon's top-left corner:  icon = <name> <x> <y>
 # (names: settings, exit. Normally written automatically when you drag an icon.)
 icon = settings 1 1
@@ -123,7 +135,7 @@ icon = exit 60 20
 
 A chord is an optional `alt+`/`shift+`/`ctrl+` modifier prefix followed by a key: a single character (`n`, `x`), a function key (`f1`…`f60`), or a named key (`tab`, `enter`, `esc`, `space`, `left`/`right`/`up`/`down`, `home`, `end`, `pgup`, `pgdn`, `delete`, `insert`, `backspace`).
 
-The available actions are: `focus_next`, `focus_prev`, `new`, `close`, `minimize`, `maximize`, `move_left`/`move_right`/`move_up`/`move_down`, `resize_left`/`resize_right`/`resize_up`/`resize_down`, `slot1`…`slot9` (focus/restore the window in taskbar slot N), and `taskbar_left`/`taskbar_right` (scroll the taskbar's window slots).
+The available actions are: `focus_next`, `focus_prev`, `new`, `close`, `minimize`, `maximize`, `move_left`/`move_right`/`move_up`/`move_down`, `resize_left`/`resize_right`/`resize_up`/`resize_down`, `scroll_up`/`scroll_down` (scroll the focused window's scrollback history), `slot1`…`slot9` (focus/restore the window in taskbar slot N), and `taskbar_left`/`taskbar_right` (scroll the taskbar's window slots).
 
 ## Acknowledgements
 

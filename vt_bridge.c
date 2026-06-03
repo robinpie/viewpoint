@@ -24,6 +24,7 @@
 #define _GNU_SOURCE
 #include "viewpoint.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
@@ -64,6 +65,11 @@ static int cb_settermprop(VTermProp prop, VTermValue *val, void *user)
     case VTERM_PROP_CURSORVISIBLE:
         w->cursor_visible = val->boolean != 0;
         break;
+    case VTERM_PROP_MOUSE:
+        /* When the inner app turns on mouse reporting, the wheel belongs to it;
+         * otherwise the wheel drives our scrollback (see input.c). */
+        w->app_mouse = val->number != VTERM_PROP_MOUSE_NONE;
+        break;
     /* OSC window titles are intentionally ignored: viewpoint derives the title
      * itself from the PTY's foreground program / shell cwd (window_refresh_title). */
     default:
@@ -88,21 +94,101 @@ static int cb_resize(int rows, int cols, void *user)
     return 1;
 }
 
-static int cb_sb_pushline(int cols, const VTermScreenCell *cells, void *user)
+/* ----- scrollback ring -----
+ * The ring holds up to w->sb_max lines, oldest at sb_head. Index i
+ * (0 = oldest .. sb_count-1 = newest) lives at slot (sb_head + i) % sb_cap. */
+
+static sb_line *sb_get(Window *w, int i)
 {
-    /* Scrollback not retained yet. */
-    (void)cols;
-    (void)cells;
-    (void)user;
-    return 0;
+    return &w->sb[(w->sb_head + i) % w->sb_cap];
 }
 
+/* libvterm hands us a line that just scrolled off the top; retain a copy. */
+static int cb_sb_pushline(int cols, const VTermScreenCell *cells, void *user)
+{
+    Window *w = user;
+    if (w->sb_max <= 0 || cols <= 0) {
+        return 0;
+    }
+    if (!w->sb) {
+        w->sb = calloc((size_t)w->sb_max, sizeof(*w->sb));
+        if (!w->sb) {
+            return 0;
+        }
+        w->sb_cap = w->sb_max;
+    }
+
+    VTermScreenCell *copy = malloc((size_t)cols * sizeof(*copy));
+    if (!copy) {
+        return 0;
+    }
+    memcpy(copy, cells, (size_t)cols * sizeof(*copy));
+
+    int slot;
+    if (w->sb_count < w->sb_cap) {
+        slot = (w->sb_head + w->sb_count) % w->sb_cap;
+        w->sb_count++;
+    } else {
+        /* Ring full: evict the oldest line. */
+        free(w->sb[w->sb_head].cells);
+        slot = w->sb_head;
+        w->sb_head = (w->sb_head + 1) % w->sb_cap;
+    }
+    w->sb[slot].cells = copy;
+    w->sb[slot].cols = cols;
+
+    /* Keep a scrolled-up view pinned to the same lines as new output streams in
+     * below it (until it saturates at the top of the history). */
+    if (w->sb_offset > 0 && w->sb_offset < w->sb_count) {
+        w->sb_offset++;
+    }
+    w->dirty = true;
+    return 1;
+}
+
+/* libvterm wants the most recently scrolled-off line back (e.g. the screen grew
+ * or scrolled down past the top). Hand back our newest retained line. */
 static int cb_sb_popline(int cols, VTermScreenCell *cells, void *user)
 {
-    (void)cols;
-    (void)cells;
-    (void)user;
-    return 0;
+    Window *w = user;
+    if (w->sb_count == 0) {
+        return 0;
+    }
+    sb_line *ln = sb_get(w, w->sb_count - 1);
+    int n = ln->cols < cols ? ln->cols : cols;
+    int i = 0;
+    for (; i < n; i++) {
+        cells[i] = ln->cells[i];
+    }
+    /* The stored line was narrower than the screen now is: pad with blanks. */
+    for (; i < cols; i++) {
+        cells[i] = ln->cells[ln->cols > 0 ? ln->cols - 1 : 0];
+        cells[i].chars[0] = 0;
+        cells[i].width = 1;
+    }
+    free(ln->cells);
+    ln->cells = NULL;
+    w->sb_count--;
+    if (w->sb_offset > w->sb_count) {
+        w->sb_offset = w->sb_count;
+    }
+    w->dirty = true;
+    return 1;
+}
+
+/* The inner app cleared the scrollback (e.g. CSI 3 J). Drop our copy too. */
+static int cb_sb_clear(void *user)
+{
+    Window *w = user;
+    for (int i = 0; i < w->sb_count; i++) {
+        free(sb_get(w, i)->cells);
+        sb_get(w, i)->cells = NULL;
+    }
+    w->sb_count = 0;
+    w->sb_head = 0;
+    w->sb_offset = 0;
+    w->dirty = true;
+    return 1;
 }
 
 static const VTermScreenCallbacks screen_cbs = {
@@ -114,7 +200,7 @@ static const VTermScreenCallbacks screen_cbs = {
     .resize      = cb_resize,
     .sb_pushline = cb_sb_pushline,
     .sb_popline  = cb_sb_popline,
-    .sb_clear    = NULL,
+    .sb_clear    = cb_sb_clear,
 };
 
 /* Output callback: bytes the emulator wants to send back to the child. */
@@ -166,9 +252,73 @@ void vt_resize(Window *w, int rows, int cols)
     if (cols < 1) cols = 1;
     w->rows = rows;
     w->cols = cols;
+    /* Snap back to the live screen: the reflow that vterm_set_size triggers
+     * makes a held scrollback offset meaningless. */
+    w->sb_offset = 0;
     vterm_set_size(w->vt, rows, cols);
     if (w->content) {
         ncplane_resize_simple(w->content, (unsigned)rows, (unsigned)cols);
+    }
+    w->dirty = true;
+}
+
+void vt_scroll(Window *w, int delta)
+{
+    int off = w->sb_offset + delta;
+    if (off < 0) off = 0;
+    if (off > w->sb_count) off = w->sb_count;
+    if (off != w->sb_offset) {
+        w->sb_offset = off;
+        w->dirty = true;
+        w->frame_dirty = true; /* refresh the title-bar scrollback indicator */
+    }
+}
+
+void vt_set_scrollback_max(Window *w, int max)
+{
+    if (max < 0) {
+        max = 0;
+    }
+    w->sb_max = max;
+
+    /* Ring not materialized yet (no lines retained): the new cap simply governs
+     * the first push. */
+    if (!w->sb || max == w->sb_cap) {
+        return;
+    }
+
+    if (max == 0) {
+        for (int i = 0; i < w->sb_count; i++) {
+            free(sb_get(w, i)->cells);
+        }
+        free(w->sb);
+        w->sb = NULL;
+        w->sb_cap = w->sb_count = w->sb_head = w->sb_offset = 0;
+        w->dirty = true;
+        return;
+    }
+
+    /* Repack into a fresh array of the new size, keeping the newest min(count,
+     * max) lines and freeing the oldest ones that no longer fit. */
+    sb_line *na = calloc((size_t)max, sizeof(*na));
+    if (!na) {
+        return; /* keep the existing ring on allocation failure */
+    }
+    int keep = w->sb_count < max ? w->sb_count : max;
+    int drop = w->sb_count - keep;
+    for (int i = 0; i < drop; i++) {
+        free(sb_get(w, i)->cells);
+    }
+    for (int i = 0; i < keep; i++) {
+        na[i] = *sb_get(w, drop + i);
+    }
+    free(w->sb);
+    w->sb = na;
+    w->sb_cap = max;
+    w->sb_head = 0;
+    w->sb_count = keep;
+    if (w->sb_offset > w->sb_count) {
+        w->sb_offset = w->sb_count;
     }
     w->dirty = true;
 }
@@ -179,6 +329,14 @@ void vt_free(Window *w)
         vterm_free(w->vt);
         w->vt = NULL;
         w->vts = NULL;
+    }
+    if (w->sb) {
+        for (int i = 0; i < w->sb_count; i++) {
+            free(sb_get(w, i)->cells);
+        }
+        free(w->sb);
+        w->sb = NULL;
+        w->sb_cap = w->sb_count = w->sb_head = w->sb_offset = 0;
     }
 }
 
@@ -223,6 +381,13 @@ static VTermModifier vterm_mods(const ncinput *ni)
 
 void vt_send_key(Window *w, const ncinput *ni)
 {
+    /* Typing snaps the view back to the live screen, like a real terminal. */
+    if (w->sb_offset != 0) {
+        w->sb_offset = 0;
+        w->dirty = true;
+        w->frame_dirty = true;
+    }
+
     VTermModifier mod = vterm_mods(ni);
     uint32_t id = ni->id;
 
@@ -329,6 +494,43 @@ static void set_plane_bg(struct ncplane *n, const VTermScreen *vts, VTermColor c
     ncplane_set_bg_rgb8(n, c.rgb.red, c.rgb.green, c.rgb.blue);
 }
 
+/* Paint one cell onto the content plane at (row,col). The trailing column of a
+ * wide glyph (width 0) must be skipped by the caller before this is reached. */
+static void paint_cell(struct ncplane *n, const VTermScreen *vts,
+                       int row, int col, const VTermScreenCell *cell)
+{
+    VTermColor fg = cell->fg;
+    VTermColor bg = cell->bg;
+    if (cell->attrs.reverse) {
+        VTermColor t = fg;
+        fg = bg;
+        bg = t;
+    }
+    set_plane_fg(n, vts, fg);
+    set_plane_bg(n, vts, bg);
+
+    unsigned styles = NCSTYLE_NONE;
+    if (cell->attrs.bold)      styles |= NCSTYLE_BOLD;
+    if (cell->attrs.underline) styles |= NCSTYLE_UNDERLINE;
+    if (cell->attrs.italic)    styles |= NCSTYLE_ITALIC;
+    if (cell->attrs.strike)    styles |= NCSTYLE_STRUCK;
+    ncplane_set_styles(n, styles);
+
+    /* Build the EGC: base glyph plus any combining chars. */
+    char egc[VTERM_MAX_CHARS_PER_CELL * 4 + 1];
+    size_t off = 0;
+    if (cell->chars[0] == 0) {
+        egc[off++] = ' ';
+    } else {
+        for (int i = 0; i < VTERM_MAX_CHARS_PER_CELL && cell->chars[i]; i++) {
+            off += utf8_encode(cell->chars[i], egc + off);
+        }
+    }
+    egc[off] = '\0';
+
+    ncplane_putegc_yx(n, row, col, egc, NULL);
+}
+
 void vt_render(Window *w)
 {
     struct ncplane *n = w->content;
@@ -336,53 +538,51 @@ void vt_render(Window *w)
         return;
     }
 
+    int off = w->sb_offset;
+    if (off < 0) off = 0;
+    if (off > w->sb_count) off = w->sb_count;
+
+    /* The visible region is a window into [scrollback ... live screen]: visible
+     * row r maps to combined index (sb_count - off) + r, where indices below
+     * sb_count are retained history and the rest are live screen rows. With
+     * off == 0 this is exactly the live screen. */
     for (int row = 0; row < w->rows; row++) {
-        for (int col = 0; col < w->cols; col++) {
-            VTermPos pos = { .row = row, .col = col };
-            VTermScreenCell cell;
-            if (vterm_screen_get_cell(w->vts, pos, &cell) == 0) {
-                continue;
-            }
-
-            /* The trailing column of a wide glyph reports width 0; the lead
-             * cell already painted it, so leave it alone. */
-            if (cell.width == 0) {
-                continue;
-            }
-
-            VTermColor fg = cell.fg;
-            VTermColor bg = cell.bg;
-            if (cell.attrs.reverse) {
-                VTermColor t = fg;
-                fg = bg;
-                bg = t;
-            }
-            set_plane_fg(n, w->vts, fg);
-            set_plane_bg(n, w->vts, bg);
-
-            unsigned styles = NCSTYLE_NONE;
-            if (cell.attrs.bold)      styles |= NCSTYLE_BOLD;
-            if (cell.attrs.underline) styles |= NCSTYLE_UNDERLINE;
-            if (cell.attrs.italic)    styles |= NCSTYLE_ITALIC;
-            if (cell.attrs.strike)    styles |= NCSTYLE_STRUCK;
-            ncplane_set_styles(n, styles);
-
-            /* Build the EGC: base glyph plus any combining chars. */
-            char egc[VTERM_MAX_CHARS_PER_CELL * 4 + 1];
-            size_t off = 0;
-            if (cell.chars[0] == 0) {
-                egc[off++] = ' ';
-            } else {
-                for (int i = 0; i < VTERM_MAX_CHARS_PER_CELL && cell.chars[i]; i++) {
-                    off += utf8_encode(cell.chars[i], egc + off);
+        int ci = w->sb_count - off + row;
+        if (ci < w->sb_count) {
+            const sb_line *ln = sb_get(w, ci);
+            for (int col = 0; col < w->cols; col++) {
+                if (col < ln->cols) {
+                    const VTermScreenCell *cell = &ln->cells[col];
+                    if (cell->width == 0) {
+                        continue;
+                    }
+                    paint_cell(n, w->vts, row, col, cell);
+                    if (cell->width == 2) {
+                        col++; /* skip the trailing half */
+                    }
+                } else {
+                    /* History line narrower than the window: pad with a blank. */
+                    ncplane_set_fg_default(n);
+                    ncplane_set_bg_default(n);
+                    ncplane_set_styles(n, NCSTYLE_NONE);
+                    ncplane_putegc_yx(n, row, col, " ", NULL);
                 }
             }
-            egc[off] = '\0';
-
-            ncplane_putegc_yx(n, row, col, egc, NULL);
-
-            if (cell.width == 2) {
-                col++; /* skip the trailing half */
+        } else {
+            int srow = ci - w->sb_count;
+            for (int col = 0; col < w->cols; col++) {
+                VTermPos pos = { .row = srow, .col = col };
+                VTermScreenCell cell;
+                if (vterm_screen_get_cell(w->vts, pos, &cell) == 0) {
+                    continue;
+                }
+                if (cell.width == 0) {
+                    continue;
+                }
+                paint_cell(n, w->vts, row, col, &cell);
+                if (cell.width == 2) {
+                    col++; /* skip the trailing half */
+                }
             }
         }
     }

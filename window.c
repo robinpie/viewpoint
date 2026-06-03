@@ -64,6 +64,7 @@ Window *window_create(WM *wm, int x, int y, int w, int h)
     win->cols = w - 2 * VP_BORDER;
     win->pty = -1;
     win->cursor_visible = true;
+    win->sb_max = wm->config.scrollback_max;
     snprintf(win->title, sizeof(win->title), "shell %d", win->id);
 
     /* Frame plane bound to the desktop (std) plane. */
@@ -340,8 +341,14 @@ void window_draw_frame(WM *wm, Window *win)
     int tend = (btnx < w) ? btnx - 1 : w - 1;
     int avail = tend - tstart;
     if (avail > 0) {
-        char buf[VP_TITLE_MAX + 8];
-        snprintf(buf, sizeof(buf), "%d:%s", win->id, win->title);
+        char buf[VP_TITLE_MAX + 32];
+        if (win->sb_offset > 0) {
+            /* Scrolled into history: show how far back the view is. */
+            snprintf(buf, sizeof(buf), "%d:[↑%d] %s",
+                     win->id, win->sb_offset, win->title);
+        } else {
+            snprintf(buf, sizeof(buf), "%d:%s", win->id, win->title);
+        }
         if ((int)strlen(buf) > avail) {
             buf[avail] = '\0';
         }

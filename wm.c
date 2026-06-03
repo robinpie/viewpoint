@@ -419,6 +419,7 @@ void wm_render(WM *wm)
      * settings editor is up). */
     Window *f = wm_focused(wm);
     if (!wm->settings.open && f && !f->minimized && f->cursor_visible &&
+        f->sb_offset == 0 &&
         f->currow >= 0 && f->currow < f->rows &&
         f->curcol >= 0 && f->curcol < f->cols) {
         int ay, ax;

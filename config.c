@@ -25,6 +25,8 @@
  *     bind   = alt+enter   new          # add or change a chord
  *     unbind = alt+f4                    # drop a default chord
  *     toggle = f12                       # the INTERPRET/PASSTHROUGH key
+ *     scrollback  = 2000                 # per-window history lines
+ *     scroll_step = 3                    # lines per mouse-wheel notch
  *
  * The keymap starts as a copy of the built-in defaults (input.c), which the
  * bind/unbind lines then edit. Recognized keys are dispatched in config_apply();
@@ -108,6 +110,26 @@ static bool config_apply(VpConfig *cfg, const char *key, char *val, int line)
     }
     if (strcmp(key, "toggle") == 0) {
         return keymap_set_toggle(cfg, val);
+    }
+    if (strcmp(key, "scrollback") == 0) {
+        char *end = NULL;
+        long n = strtol(val, &end, 10);
+        if (end == val || *trim(end) != '\0' || n < 0 || n > VP_SCROLLBACK_LIMIT) {
+            vp_log("config: line %d: scrollback needs 0..%d\n", line, VP_SCROLLBACK_LIMIT);
+            return false;
+        }
+        cfg->scrollback_max = (int)n;
+        return true;
+    }
+    if (strcmp(key, "scroll_step") == 0) {
+        char *end = NULL;
+        long n = strtol(val, &end, 10);
+        if (end == val || *trim(end) != '\0' || n < 1 || n > VP_SCROLL_STEP_MAX) {
+            vp_log("config: line %d: scroll_step needs 1..%d\n", line, VP_SCROLL_STEP_MAX);
+            return false;
+        }
+        cfg->scroll_step = (int)n;
+        return true;
     }
     if (strcmp(key, "icon") == 0) {
         /* value is "<name> <x> <y>" - a desktop launcher icon's top-left cell */
@@ -205,6 +227,8 @@ void config_defaults(VpConfig *cfg)
     /* -1 = "unset": use each icon's built-in default placement. */
     cfg->settings_icon_y = cfg->settings_icon_x = -1;
     cfg->exit_icon_y     = cfg->exit_icon_x     = -1;
+    cfg->scrollback_max  = VP_SCROLLBACK_MAX;
+    cfg->scroll_step     = VP_SCROLL_STEP;
 }
 
 void config_free(VpConfig *cfg)
@@ -258,6 +282,14 @@ static void write_inapp_diff(FILE *f, const VpConfig *cfg, const VpConfig *base)
     if (cfg->toggle_key != base->toggle_key) {
         keymap_format_chord(cfg->toggle_key, 0, chord, sizeof(chord));
         fprintf(f, "toggle = %s\n", chord);
+    }
+
+    /* Terminal tunables, only when they differ from the baseline. */
+    if (cfg->scrollback_max != base->scrollback_max) {
+        fprintf(f, "scrollback = %d\n", cfg->scrollback_max);
+    }
+    if (cfg->scroll_step != base->scroll_step) {
+        fprintf(f, "scroll_step = %d\n", cfg->scroll_step);
     }
 
     /* Desktop icon positions, only when set and differing from the baseline (so
@@ -315,28 +347,58 @@ static bool manual_touches_action(const VpConfig *defs, const VpConfig *mbase,
     return false;
 }
 
-bool config_manual_shadows(const VpConfig *live, bool is_toggle,
-                           vp_action act, uint32_t id, unsigned mods)
+/* Build the baseline pair every shadow check needs: `defs` = built-in defaults,
+ * `mbase` = defaults overlaid with the user's manual section only. Returns false
+ * (leaving both untouched) when there is no manual section to shadow anything. */
+static bool shadow_baseline(const VpConfig *live, VpConfig *defs, VpConfig *mbase)
 {
     if (!live->manual_text || !*live->manual_text) {
-        return false; /* no manual section - nothing can shadow */
+        return false;
     }
+    config_defaults(defs);
+    config_defaults(mbase);
+    config_apply_text(mbase, live->manual_text);
+    return true;
+}
 
+/* The single place mapping a scalar setting to the VpConfig field holding it.
+ * Add a case here (and a vp_setting value) to extend the shadow check to a new
+ * in-app setting. */
+static bool setting_differs(const VpConfig *a, const VpConfig *b, vp_setting s)
+{
+    switch (s) {
+    case SETTING_TOGGLE_KEY:  return a->toggle_key != b->toggle_key;
+    case SETTING_SCROLLBACK:  return a->scrollback_max != b->scrollback_max;
+    case SETTING_SCROLL_STEP: return a->scroll_step != b->scroll_step;
+    }
+    return false;
+}
+
+bool config_manual_shadows_setting(const VpConfig *live, vp_setting setting)
+{
     VpConfig defs, mbase;
-    config_defaults(&defs);
-    config_defaults(&mbase);
-    config_apply_text(&mbase, live->manual_text);
-
-    bool shadow;
-    if (is_toggle) {
-        shadow = (mbase.toggle_key != defs.toggle_key);
-    } else {
-        /* Shadowed if the manual section governs this action, or the chord
-         * we're assigning (it would reassert its own meaning on reload). */
-        shadow = manual_touches_action(&defs, &mbase, act) ||
-                 (chord_action(&defs, id, mods) != chord_action(&mbase, id, mods));
+    if (!shadow_baseline(live, &defs, &mbase)) {
+        return false;
     }
+    /* Shadowed when the manual section sets this value away from the default:
+     * whatever the in-app change writes, the manual section reasserts on load. */
+    bool shadow = setting_differs(&defs, &mbase, setting);
+    config_free(&defs);
+    config_free(&mbase);
+    return shadow;
+}
 
+bool config_manual_shadows_action(const VpConfig *live, vp_action act,
+                                  uint32_t id, unsigned mods)
+{
+    VpConfig defs, mbase;
+    if (!shadow_baseline(live, &defs, &mbase)) {
+        return false;
+    }
+    /* Shadowed if the manual section governs this action, or the chord we're
+     * assigning (it would reassert its own meaning on reload). */
+    bool shadow = manual_touches_action(&defs, &mbase, act) ||
+                  (chord_action(&defs, id, mods) != chord_action(&mbase, id, mods));
     config_free(&defs);
     config_free(&mbase);
     return shadow;

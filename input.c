@@ -52,6 +52,7 @@ static void toggle_mode(WM *wm)
  * matched exactly against the SHIFT/ALT/CTRL bits (lock bits are ignored). */
 #define A  NCKEY_MOD_ALT
 #define AS (NCKEY_MOD_ALT | NCKEY_MOD_SHIFT)
+#define S  NCKEY_MOD_SHIFT
 
 static const keychord g_default_keymap[] = {
     { NCKEY_TAB,   A,  ACT_FOCUS_NEXT },
@@ -68,6 +69,8 @@ static const keychord g_default_keymap[] = {
     { NCKEY_RIGHT, AS, ACT_RESIZE_R },
     { NCKEY_UP,    AS, ACT_RESIZE_U },
     { NCKEY_DOWN,  AS, ACT_RESIZE_D },
+    { NCKEY_PGUP,   S, ACT_SCROLL_UP },
+    { NCKEY_PGDOWN, S, ACT_SCROLL_DOWN },
     { '1', A, ACT_SLOT_1 }, { '2', A, ACT_SLOT_2 }, { '3', A, ACT_SLOT_3 },
     { '4', A, ACT_SLOT_4 }, { '5', A, ACT_SLOT_5 }, { '6', A, ACT_SLOT_6 },
     { '7', A, ACT_SLOT_7 }, { '8', A, ACT_SLOT_8 }, { '9', A, ACT_SLOT_9 },
@@ -76,6 +79,7 @@ static const keychord g_default_keymap[] = {
 
 #undef A
 #undef AS
+#undef S
 
 /* ----- config keymap parsing & construction ----------------------------- */
 
@@ -97,6 +101,8 @@ static const struct { const char *name; const char *label; vp_action act; } g_ac
     { "resize_right", "Resize window right",   ACT_RESIZE_R },
     { "resize_up",    "Resize window up",      ACT_RESIZE_U },
     { "resize_down",  "Resize window down",    ACT_RESIZE_D },
+    { "scroll_up",    "Scroll back (history)", ACT_SCROLL_UP },
+    { "scroll_down",  "Scroll forward",        ACT_SCROLL_DOWN },
     { "slot1", "Focus taskbar slot 1", ACT_SLOT_1 },
     { "slot2", "Focus taskbar slot 2", ACT_SLOT_2 },
     { "slot3", "Focus taskbar slot 3", ACT_SLOT_3 },
@@ -500,6 +506,15 @@ static void do_action(WM *wm, vp_action act)
     case ACT_RESIZE_R:   wm_resize_focused(wm, +RESIZE_STEP, 0); break;
     case ACT_RESIZE_U:   wm_resize_focused(wm, 0, -RESIZE_STEP); break;
     case ACT_RESIZE_D:   wm_resize_focused(wm, 0, +RESIZE_STEP); break;
+    case ACT_SCROLL_UP: case ACT_SCROLL_DOWN: {
+        /* Keyboard scrolls a near-page at a time. */
+        Window *win = wm_focused(wm);
+        if (win) {
+            int page = win->rows > 1 ? win->rows - 1 : 1;
+            vt_scroll(win, act == ACT_SCROLL_UP ? +page : -page);
+        }
+        break;
+    }
     case ACT_SLOT_1: case ACT_SLOT_2: case ACT_SLOT_3:
     case ACT_SLOT_4: case ACT_SLOT_5: case ACT_SLOT_6:
     case ACT_SLOT_7: case ACT_SLOT_8: case ACT_SLOT_9:
@@ -1034,9 +1049,18 @@ static void mouse_event(WM *wm, mev_type t, int btn, int y, int x, unsigned mods
     case MEV_RELEASE:     mouse_release(wm, btn, y, x, mods); break;
     case MEV_MOTION:      mouse_motion(wm, y, x, mods); break;
     case MEV_SCROLL_UP:
-    case MEV_SCROLL_DOWN:
-        content_forward(wm_window_at(wm, y, x), t, btn, y, x, mods);
+    case MEV_SCROLL_DOWN: {
+        /* The wheel scrolls our scrollback, unless the hovered app grabbed the
+         * mouse (e.g. less, vim) - then the notches belong to it. */
+        Window *win = wm_window_at(wm, y, x);
+        if (win && !win->app_mouse) {
+            int step = wm->config.scroll_step;
+            vt_scroll(win, t == MEV_SCROLL_UP ? +step : -step);
+        } else {
+            content_forward(win, t, btn, y, x, mods);
+        }
         break;
+    }
     case MEV_SCROLL_LEFT:
     case MEV_SCROLL_RIGHT:
         /* Horizontal wheel over the taskbar row scrolls its window slots;
