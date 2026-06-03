@@ -15,6 +15,8 @@ You need the development headers and libraries for notcurses, libvterm and GPM, 
 
 On Arch Linux: `sudo pacman -S notcurses libvterm gpm base-devel`
 
+On Debian: `sudo apt install libvterm-dev libgpm-dev build-essential cmake ninja-build libavdevice-dev libunistring-dev` (notcurses is not packaged in Debian 13, so install it from [source](https://github.com/dankamongmen/notcurses) and run `sudo ldconfig`, or wait for Debian 14)
+
 notcurses and libvterm are located via `pkg-config`. GPM is linked directly with `-lgpm`. For a mouse on the bare Linux console, you also need the `gpm` daemon running.
 
 ## Run
