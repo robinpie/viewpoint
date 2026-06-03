@@ -139,6 +139,13 @@ int main(void)
     sigaction(SIGCHLD, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
 
+    /* Windows Terminal sets WT_SESSION but not COLORTERM, so notcurses can't
+     * auto-detect true color and falls back to 256 colors, making the dark
+     * desktop background collapse to pure black. */
+    if (getenv("WT_SESSION") && !getenv("COLORTERM")) {
+        setenv("COLORTERM", "truecolor", 0);
+    }
+
     notcurses_options opts = {0};
     opts.flags = NCOPTION_SUPPRESS_BANNERS;
     struct notcurses *nc = notcurses_init(&opts, stdout);
