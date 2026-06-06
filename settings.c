@@ -463,6 +463,7 @@ void settings_close(WM *wm)
         ncplane_destroy(s->panel);
         s->panel = NULL;
     }
+    wm->needs_render = true; /* recomposite the desktop without the panel */
     config_save(&wm->config);
     vp_log("settings: close (saved)\n");
 }
@@ -997,11 +998,11 @@ static void draw_terminal(WM *wm, struct ncplane *p, int W, int H)
     ncplane_putstr_yx(p, H - 2, 2, hbuf);
 }
 
-void settings_render(WM *wm)
+bool settings_render(WM *wm)
 {
     Settings *s = &wm->settings;
     if (!s->open || !s->panel || !s->dirty) {
-        return;
+        return false;
     }
     struct ncplane *p = s->panel;
 
@@ -1023,4 +1024,5 @@ void settings_render(WM *wm)
 
     ncplane_move_top(p);
     s->dirty = false;
+    return true;
 }

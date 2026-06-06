@@ -30,13 +30,40 @@
 #include <errno.h>
 
 /* ------------------------------------------------------------------------- */
+/* Damage accumulation                                                       */
+/* ------------------------------------------------------------------------- */
+
+/* Mark the live-screen rows [r0, r1) as needing a repaint at the next sweep. */
+static void dmg_add_rows(Window *w, int r0, int r1)
+{
+    if (w->dmg_all) {
+        return; /* already repainting everything */
+    }
+    if (!w->dmg_valid) {
+        w->dmg_r0 = r0;
+        w->dmg_r1 = r1;
+        w->dmg_valid = true;
+    } else {
+        if (r0 < w->dmg_r0) w->dmg_r0 = r0;
+        if (r1 > w->dmg_r1) w->dmg_r1 = r1;
+    }
+}
+
+/* Force a full-window repaint at the next sweep. */
+static void dmg_full(Window *w)
+{
+    w->dmg_all = true;
+}
+
+/* ------------------------------------------------------------------------- */
 /* libvterm callbacks                                                        */
 /* ------------------------------------------------------------------------- */
 
 static int cb_damage(VTermRect rect, void *user)
 {
-    (void)rect;
-    ((Window *)user)->dirty = true;
+    Window *w = user;
+    dmg_add_rows(w, rect.start_row, rect.end_row);
+    w->dirty = true;
     return 1;
 }
 
@@ -44,7 +71,11 @@ static int cb_moverect(VTermRect dest, VTermRect src, void *user)
 {
     (void)dest;
     (void)src;
-    ((Window *)user)->dirty = true;
+    /* A scrolled band is cheaper to treat as a full repaint than to track the
+     * moved region precisely; the precise-damage win is for small in-place edits. */
+    Window *w = user;
+    dmg_full(w);
+    w->dirty = true;
     return 1;
 }
 
@@ -90,7 +121,9 @@ static int cb_resize(int rows, int cols, void *user)
     /* We drive resizes ourselves (vt_resize); just note the dirty state. */
     (void)rows;
     (void)cols;
-    ((Window *)user)->dirty = true;
+    Window *w = user;
+    dmg_full(w);
+    w->dirty = true;
     return 1;
 }
 
@@ -142,6 +175,7 @@ static int cb_sb_pushline(int cols, const VTermScreenCell *cells, void *user)
     if (w->sb_offset > 0 && w->sb_offset < w->sb_count) {
         w->sb_offset++;
     }
+    dmg_full(w);
     w->dirty = true;
     return 1;
 }
@@ -172,6 +206,7 @@ static int cb_sb_popline(int cols, VTermScreenCell *cells, void *user)
     if (w->sb_offset > w->sb_count) {
         w->sb_offset = w->sb_count;
     }
+    dmg_full(w);
     w->dirty = true;
     return 1;
 }
@@ -187,6 +222,7 @@ static int cb_sb_clear(void *user)
     w->sb_count = 0;
     w->sb_head = 0;
     w->sb_offset = 0;
+    dmg_full(w);
     w->dirty = true;
     return 1;
 }
@@ -237,11 +273,15 @@ void vt_init(Window *w)
     vterm_output_set_callback(w->vt, cb_output, w);
 
     w->cursor_visible = true;
+    dmg_full(w);
     w->dirty = true;
 }
 
 void vt_feed(Window *w, const char *bytes, size_t n)
 {
+    /* vterm_input_write drives the screen callbacks synchronously, so the
+     * precise damage region is accumulated for us during this call; we only
+     * flag dirty so the render pass knows to sweep. */
     vterm_input_write(w->vt, bytes, n);
     w->dirty = true;
 }
@@ -259,6 +299,7 @@ void vt_resize(Window *w, int rows, int cols)
     if (w->content) {
         ncplane_resize_simple(w->content, (unsigned)rows, (unsigned)cols);
     }
+    dmg_full(w);
     w->dirty = true;
 }
 
@@ -269,6 +310,7 @@ void vt_scroll(Window *w, int delta)
     if (off > w->sb_count) off = w->sb_count;
     if (off != w->sb_offset) {
         w->sb_offset = off;
+        dmg_full(w);
         w->dirty = true;
         w->frame_dirty = true; /* refresh the title-bar scrollback indicator */
     }
@@ -294,6 +336,7 @@ void vt_set_scrollback_max(Window *w, int max)
         free(w->sb);
         w->sb = NULL;
         w->sb_cap = w->sb_count = w->sb_head = w->sb_offset = 0;
+        dmg_full(w);
         w->dirty = true;
         return;
     }
@@ -320,6 +363,7 @@ void vt_set_scrollback_max(Window *w, int max)
     if (w->sb_offset > w->sb_count) {
         w->sb_offset = w->sb_count;
     }
+    dmg_full(w);
     w->dirty = true;
 }
 
@@ -470,33 +514,81 @@ static size_t utf8_encode(uint32_t cp, char *out)
     }
 }
 
-static void set_plane_fg(struct ncplane *n, const VTermScreen *vts, VTermColor c)
+/* The plane's fg/bg/styles last applied during a sweep. Runs of identically
+ * styled cells (the common case - whole lines share attributes) then skip the
+ * redundant setter calls and indexed-to-rgb conversions. Reset per vt_render so
+ * the first painted cell always establishes the state. */
+typedef struct {
+    bool init;
+    bool fg_def, bg_def;
+    uint8_t fg_r, fg_g, fg_b, bg_r, bg_g, bg_b;
+    unsigned styles;
+} cellcache;
+
+static void apply_fg(struct ncplane *n, const VTermScreen *vts, cellcache *cc,
+                     VTermColor c)
 {
     if (VTERM_COLOR_IS_DEFAULT_FG(&c)) {
-        ncplane_set_fg_default(n);
+        if (!cc->init || !cc->fg_def) {
+            ncplane_set_fg_default(n);
+            cc->fg_def = true;
+        }
         return;
     }
     if (VTERM_COLOR_IS_INDEXED(&c)) {
         vterm_screen_convert_color_to_rgb(vts, &c);
     }
-    ncplane_set_fg_rgb8(n, c.rgb.red, c.rgb.green, c.rgb.blue);
+    if (!cc->init || cc->fg_def ||
+        cc->fg_r != c.rgb.red || cc->fg_g != c.rgb.green || cc->fg_b != c.rgb.blue) {
+        ncplane_set_fg_rgb8(n, c.rgb.red, c.rgb.green, c.rgb.blue);
+        cc->fg_def = false;
+        cc->fg_r = c.rgb.red; cc->fg_g = c.rgb.green; cc->fg_b = c.rgb.blue;
+    }
 }
 
-static void set_plane_bg(struct ncplane *n, const VTermScreen *vts, VTermColor c)
+static void apply_bg(struct ncplane *n, const VTermScreen *vts, cellcache *cc,
+                     VTermColor c)
 {
     if (VTERM_COLOR_IS_DEFAULT_BG(&c)) {
-        ncplane_set_bg_default(n);
+        if (!cc->init || !cc->bg_def) {
+            ncplane_set_bg_default(n);
+            cc->bg_def = true;
+        }
         return;
     }
     if (VTERM_COLOR_IS_INDEXED(&c)) {
         vterm_screen_convert_color_to_rgb(vts, &c);
     }
-    ncplane_set_bg_rgb8(n, c.rgb.red, c.rgb.green, c.rgb.blue);
+    if (!cc->init || cc->bg_def ||
+        cc->bg_r != c.rgb.red || cc->bg_g != c.rgb.green || cc->bg_b != c.rgb.blue) {
+        ncplane_set_bg_rgb8(n, c.rgb.red, c.rgb.green, c.rgb.blue);
+        cc->bg_def = false;
+        cc->bg_r = c.rgb.red; cc->bg_g = c.rgb.green; cc->bg_b = c.rgb.blue;
+    }
+}
+
+static void apply_styles(struct ncplane *n, cellcache *cc, unsigned styles)
+{
+    if (!cc->init || cc->styles != styles) {
+        ncplane_set_styles(n, styles);
+        cc->styles = styles;
+    }
+}
+
+/* Paint a default-colored blank (used to pad history lines narrower than the
+ * window). Goes through the cache like a real cell so state stays in sync. */
+static void paint_blank(struct ncplane *n, cellcache *cc, int row, int col)
+{
+    if (!cc->init || !cc->fg_def) { ncplane_set_fg_default(n); cc->fg_def = true; }
+    if (!cc->init || !cc->bg_def) { ncplane_set_bg_default(n); cc->bg_def = true; }
+    apply_styles(n, cc, NCSTYLE_NONE);
+    cc->init = true;
+    ncplane_putegc_yx(n, row, col, " ", NULL);
 }
 
 /* Paint one cell onto the content plane at (row,col). The trailing column of a
  * wide glyph (width 0) must be skipped by the caller before this is reached. */
-static void paint_cell(struct ncplane *n, const VTermScreen *vts,
+static void paint_cell(struct ncplane *n, const VTermScreen *vts, cellcache *cc,
                        int row, int col, const VTermScreenCell *cell)
 {
     VTermColor fg = cell->fg;
@@ -506,15 +598,16 @@ static void paint_cell(struct ncplane *n, const VTermScreen *vts,
         fg = bg;
         bg = t;
     }
-    set_plane_fg(n, vts, fg);
-    set_plane_bg(n, vts, bg);
+    apply_fg(n, vts, cc, fg);
+    apply_bg(n, vts, cc, bg);
 
     unsigned styles = NCSTYLE_NONE;
     if (cell->attrs.bold)      styles |= NCSTYLE_BOLD;
     if (cell->attrs.underline) styles |= NCSTYLE_UNDERLINE;
     if (cell->attrs.italic)    styles |= NCSTYLE_ITALIC;
     if (cell->attrs.strike)    styles |= NCSTYLE_STRUCK;
-    ncplane_set_styles(n, styles);
+    apply_styles(n, cc, styles);
+    cc->init = true;
 
     /* Build the EGC: base glyph plus any combining chars. */
     char egc[VTERM_MAX_CHARS_PER_CELL * 4 + 1];
@@ -542,11 +635,23 @@ void vt_render(Window *w)
     if (off < 0) off = 0;
     if (off > w->sb_count) off = w->sb_count;
 
+    /* Repaint only the rows libvterm reported as damaged. A precise row range
+     * applies only to the live screen (off == 0); any scrollback view, plus
+     * scrolls/resizes (dmg_all) and the dirty-without-damage fallback, sweeps
+     * the whole grid. */
+    int r0 = 0, r1 = w->rows;
+    if (off == 0 && !w->dmg_all && w->dmg_valid) {
+        r0 = w->dmg_r0 < 0 ? 0 : w->dmg_r0;
+        r1 = w->dmg_r1 > w->rows ? w->rows : w->dmg_r1;
+    }
+
+    cellcache cc = {0};
+
     /* The visible region is a window into [scrollback ... live screen]: visible
      * row r maps to combined index (sb_count - off) + r, where indices below
      * sb_count are retained history and the rest are live screen rows. With
      * off == 0 this is exactly the live screen. */
-    for (int row = 0; row < w->rows; row++) {
+    for (int row = r0; row < r1; row++) {
         int ci = w->sb_count - off + row;
         if (ci < w->sb_count) {
             const sb_line *ln = sb_get(w, ci);
@@ -556,16 +661,13 @@ void vt_render(Window *w)
                     if (cell->width == 0) {
                         continue;
                     }
-                    paint_cell(n, w->vts, row, col, cell);
+                    paint_cell(n, w->vts, &cc, row, col, cell);
                     if (cell->width == 2) {
                         col++; /* skip the trailing half */
                     }
                 } else {
                     /* History line narrower than the window: pad with a blank. */
-                    ncplane_set_fg_default(n);
-                    ncplane_set_bg_default(n);
-                    ncplane_set_styles(n, NCSTYLE_NONE);
-                    ncplane_putegc_yx(n, row, col, " ", NULL);
+                    paint_blank(n, &cc, row, col);
                 }
             }
         } else {
@@ -579,7 +681,7 @@ void vt_render(Window *w)
                 if (cell.width == 0) {
                     continue;
                 }
-                paint_cell(n, w->vts, row, col, &cell);
+                paint_cell(n, w->vts, &cc, row, col, &cell);
                 if (cell.width == 2) {
                     col++; /* skip the trailing half */
                 }
@@ -587,4 +689,6 @@ void vt_render(Window *w)
         }
     }
     w->dirty = false;
+    w->dmg_all = false;
+    w->dmg_valid = false;
 }

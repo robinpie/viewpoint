@@ -107,6 +107,12 @@ void taskbar_create(WM *wm)
     o.cols = wm->scr_cols;
     wm->taskbar = ncplane_create(wm->std, &o);
     if (wm->taskbar) {
+        /* Base cell = the bar's background, so ncplane_erase fills the whole row
+         * with it in one shot (no per-column space loop needed each redraw). */
+        uint64_t ch = 0;
+        ncchannels_set_fg_rgb8(&ch, 0xd0, 0xd0, 0xd0);
+        ncchannels_set_bg_rgb8(&ch, 0x18, 0x18, 0x20);
+        ncplane_set_base(wm->taskbar, " ", 0, ch);
         ncplane_move_top(wm->taskbar);
         wm->taskbar_dirty = true;
     }
@@ -131,14 +137,10 @@ void taskbar_draw(WM *wm)
     }
     compute_layout(wm);
 
-    /* Background fill. */
-    ncplane_set_fg_rgb8(t, 0xd0, 0xd0, 0xd0);
-    ncplane_set_bg_rgb8(t, 0x18, 0x18, 0x20);
+    /* Background fill: erase paints the whole row with the base cell (the bar's
+     * background, set in taskbar_create). */
     ncplane_set_styles(t, NCSTYLE_NONE);
     ncplane_erase(t);
-    for (unsigned c = 0; c < wm->scr_cols; c++) {
-        ncplane_putchar_yx(t, 0, (int)c, ' ');
-    }
 
     for (int s = 0; s < g_nslots; s++) {
         Window *win = wm->wins[g_slots[s].win_idx];

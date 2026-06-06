@@ -661,6 +661,7 @@ static void snap_hide(WM *wm)
 {
     if (wm->snap_plane) {
         ncplane_move_yx(wm->snap_plane, VP_HIDDEN_Y, 0);
+        wm->needs_render = true; /* outline moved off-screen; recomposite */
     }
     wm->snap_preview = SNAP_NONE;
 }
@@ -712,6 +713,7 @@ static void snap_show(WM *wm, vp_snapzone z)
     }
     ncplane_move_top(p);
     wm->snap_preview = z;
+    wm->needs_render = true; /* outline shown/moved; recomposite */
 }
 
 /* ----- content-area forwarding to the inner app ----- */
@@ -772,6 +774,7 @@ static void update_drag(WM *wm, int y, int x)
         if (ny < 0) ny = 0;
         if (nx < 0) nx = 0;
         ncplane_move_yx(icon, ny, nx);
+        wm->needs_render = true; /* icon plane moved; recomposite */
         return;
     }
 

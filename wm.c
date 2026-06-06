@@ -35,6 +35,8 @@ void wm_init(WM *wm, struct notcurses *nc)
     wm->focused = -1;
     wm->next_id = 1;
     wm->mode = MODE_INTERPRET;
+    wm->needs_render = true;  /* force the first frame */
+    wm->ptr_y = wm->ptr_x = -1; /* no software pointer placed yet */
     config_load(&wm->config);
     notcurses_stddim_yx(nc, &wm->scr_rows, &wm->scr_cols);
 
@@ -391,6 +393,13 @@ Window *wm_window_at(WM *wm, int y, int x)
 
 void wm_render(WM *wm)
 {
+    /* Track whether anything actually changed this pass; if not, we skip the
+     * (expensive) notcurses_render entirely. needs_render carries signals from
+     * mutations that move planes without a per-object dirty flag (dragged icons,
+     * the snap outline, a closed settings panel). */
+    bool drew = wm->needs_render;
+    wm->needs_render = false;
+
     for (int i = 0; i < wm->nwins; i++) {
         Window *win = wm->wins[i];
         /* Keep titles in step with the running program / shell cwd. Done for
@@ -403,37 +412,70 @@ void wm_render(WM *wm)
         }
         if (win->frame_dirty) {
             window_draw_frame(wm, win);
+            drew = true;
         }
         if (win->dirty) {
             vt_render(win);
+            drew = true;
         }
     }
 
     if (wm->taskbar && wm->taskbar_dirty) {
         taskbar_draw(wm);
+        drew = true;
     }
 
-    settings_render(wm);
+    if (settings_render(wm)) {
+        drew = true;
+    }
 
     /* Inner cursor only for the focused window (suppressed while the modal
-     * settings editor is up). */
+     * settings editor is up). Compute the desired state, then compare against
+     * what we last applied: a bare cursor move (no content damage) still needs a
+     * render, while a pass that changes nothing visible can be skipped. */
     Window *f = wm_focused(wm);
-    if (!wm->settings.open && f && !f->minimized && f->cursor_visible &&
+    bool want_cursor = (!wm->settings.open && f && !f->minimized && f->cursor_visible &&
         f->sb_offset == 0 &&
         f->currow >= 0 && f->currow < f->rows &&
-        f->curcol >= 0 && f->curcol < f->cols) {
+        f->curcol >= 0 && f->curcol < f->cols);
+    int cy = 0, cx = 0;
+    if (want_cursor) {
         int ay, ax;
         ncplane_abs_yx(f->content, &ay, &ax);
-        notcurses_cursor_enable(wm->nc, ay + f->currow, ax + f->curcol);
+        cy = ay + f->currow;
+        cx = ax + f->curcol;
+    }
+    if (want_cursor != wm->cursor_on ||
+        (want_cursor && (cy != wm->cursor_y || cx != wm->cursor_x))) {
+        drew = true;
+    }
+
+    /* Software pointer (console only): a hover move shifts the cell it sits on. */
+    bool want_ptr = wm->draw_cursor && wm->cursor;
+    if (want_ptr && (wm->mouse_y != wm->ptr_y || wm->mouse_x != wm->ptr_x)) {
+        drew = true;
+    }
+
+    if (!drew) {
+        return; /* nothing changed; don't pay for a render */
+    }
+
+    if (want_cursor) {
+        notcurses_cursor_enable(wm->nc, cy, cx);
     } else {
         notcurses_cursor_disable(wm->nc);
     }
+    wm->cursor_on = want_cursor;
+    wm->cursor_y = cy;
+    wm->cursor_x = cx;
 
     /* Park the software pointer over the last mouse cell, on top of everything
      * else (taskbar/settings raise themselves, so re-assert top each frame). */
-    if (wm->draw_cursor && wm->cursor) {
+    if (want_ptr) {
         ncplane_move_yx(wm->cursor, wm->mouse_y, wm->mouse_x);
         ncplane_move_top(wm->cursor);
+        wm->ptr_y = wm->mouse_y;
+        wm->ptr_x = wm->mouse_x;
     }
 
     notcurses_render(wm->nc);

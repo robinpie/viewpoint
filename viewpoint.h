@@ -192,6 +192,14 @@ typedef struct Window {
     bool frame_dirty; /* frame chrome needs a redraw (geometry/title/focus) */
     bool dead;        /* child exited; destroy after the current loop pass */
 
+    /* Accumulated screen-damage since the last vt_render, so the sweep can repaint
+     * only the rows that actually changed instead of the whole grid. dmg_all
+     * forces a full repaint (scrolls/resizes/scrollback view changes); otherwise
+     * dmg_valid means [dmg_r0, dmg_r1) is the damaged live-screen row range. */
+    bool dmg_all;
+    bool dmg_valid;
+    int dmg_r0, dmg_r1;
+
     /* inner cursor position (content-relative) and visibility, tracked from
      * the vterm movecursor / settermprop callbacks */
     int currow, curcol;
@@ -329,6 +337,19 @@ typedef struct WM {
     int last_titleclick_win;     /* id of the window it landed on (0 = none) */
 
     bool should_quit;
+
+    /* Set by mutations that change the display but don't go through a per-object
+     * dirty flag (plane moves: dragged icons, the snap-preview outline, a closed
+     * settings panel). wm_render skips the (expensive) notcurses_render entirely
+     * when nothing - including this - is dirty, so idle/hover frames are free. */
+    bool needs_render;
+
+    /* Last state actually applied to the display, for change detection in
+     * wm_render: the hardware text cursor and (console only) the software mouse
+     * pointer cell. Lets a bare hover with no visible effect skip rendering. */
+    bool cursor_on;
+    int  cursor_y, cursor_x;
+    int  ptr_y, ptr_x;
 
     VpConfig config;
     Settings settings;
@@ -521,8 +542,9 @@ bool settings_icon_hit(WM *wm, int y, int x);
 void settings_handle_key(WM *wm, const ncinput *ni);
 void settings_click(WM *wm, int btn, int y, int x);
 void settings_scroll(WM *wm, int dir);
-/* Redraw the panel if open and dirty (called from the WM render pass). */
-void settings_render(WM *wm);
+/* Redraw the panel if open and dirty (called from the WM render pass);
+ * returns true if it actually drew. */
+bool settings_render(WM *wm);
 /* Destroy planes on shutdown. */
 void settings_teardown(WM *wm);
 
