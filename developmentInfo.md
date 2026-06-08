@@ -45,5 +45,5 @@ Because notcurses can't deliver bare hover-motion over GPM (it only forwards but
 
 ### Todo
 
-- Fix numerous bugs and UI polish issues
-- Far in the future, but keep abstractions clean for: inner-application sixel passthrough, viewpoint-native sixel widgets, and `NCBLIT_PIXEL` graphics.
+- Fix bugs and UI polish issues
+- README roadmap
