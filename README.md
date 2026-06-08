@@ -143,6 +143,7 @@ The available actions are: `focus_next`, `focus_prev`, `new`, `close`, `minimize
 
 * sixel passthrough support
 * themes, including custom desktop backgrounds
+* viewpoint-native widget framework
 
 ### Maybes
 
