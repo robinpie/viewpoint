@@ -139,6 +139,16 @@ A chord is an optional `alt+`/`shift+`/`ctrl+` modifier prefix followed by a key
 
 The available actions are: `focus_next`, `focus_prev`, `new`, `close`, `minimize`, `maximize`, `move_left`/`move_right`/`move_up`/`move_down`, `resize_left`/`resize_right`/`resize_up`/`resize_down`, `scroll_up`/`scroll_down` (scroll the focused window's scrollback history), `slot1`…`slot9` (focus/restore the window in taskbar slot N), and `taskbar_left`/`taskbar_right` (scroll the taskbar's window slots).
 
+## Roadmap
+
+* sixel passthrough support
+* themes, including custom desktop backgrounds
+
+### Maybes
+
+* Kitty graphics passthrough support
+* fake framebuffers for raw-framebuffer-writing graphics support?
+
 ## Acknowledgements
 
 This project uses the following libraries:
