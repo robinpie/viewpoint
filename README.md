@@ -4,7 +4,7 @@ viewpoint is a terminal multiplexer with a desktop-window-manager metaphor for L
 
 viewpoint presents floating windows in a WIMPy interface on your terminal. Each window runs its own shell (or any program) in a dedicated PTY, but with the amazing 1990s innovations in window chrome: draggable borders, a title bar with minimize/maximize/close buttons, and a taskbar. You move, resize, raise, snap, minimize and maximize windows with the mouse or keyboard, similarly as on a graphical desktop.
 
-Extremely early in development, things will change.
+Early in development, things will change.
 
 ## Build and dependencies
 
