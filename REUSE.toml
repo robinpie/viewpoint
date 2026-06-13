@@ -1,0 +1,18 @@
+version = 1
+
+# Source files (*.c, *.h) carry their own SPDX headers.
+# The .clang-format file is borrowed from the Linux kernel and is GPL-2.0-only;
+# it carries its own header. Everything else is covered below.
+
+[[annotations]]
+path = [
+    "README.md",
+    "developmentInfo.md",
+    "Makefile",
+    ".gitignore",
+    ".gitattributes",
+    "screenshotForReadme.png",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 robinpie <robin413@protonmail.com>"
+SPDX-License-Identifier = "GPL-3.0-only"
