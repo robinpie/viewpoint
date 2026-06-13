@@ -142,6 +142,9 @@ static sb_line *sb_get(Window *w, int i)
 static int cb_sb_pushline(int cols, const VTermScreenCell *cells, void *user)
 {
 	Window *w = user;
+	/* A line left the top of the live screen: advance the absolute coordinate
+	 * sixel images are anchored in, whether or not we retain the line. */
+	w->scroll_base++;
 	if (w->sb_max <= 0 || cols <= 0) {
 		return 0;
 	}
@@ -205,6 +208,7 @@ static int cb_sb_popline(int cols, VTermScreenCell *cells, void *user)
 	free(ln->cells);
 	ln->cells = NULL;
 	w->sb_count--;
+	w->scroll_base--; /* a retained line returned to the live screen */
 	if (w->sb_offset > w->sb_count) {
 		w->sb_offset = w->sb_count;
 	}
@@ -224,6 +228,7 @@ static int cb_sb_clear(void *user)
 	w->sb_count = 0;
 	w->sb_head = 0;
 	w->sb_offset = 0;
+	sixel_images_clear(w);
 	dmg_full(w);
 	w->dirty = true;
 	return 1;
@@ -241,13 +246,65 @@ static const VTermScreenCallbacks screen_cbs = {
 	.sb_clear = cb_sb_clear,
 };
 
-/* Output callback: bytes the emulator wants to send back to the child. */
-static void cb_output(const char *s, size_t len, void *user)
+/* libvterm hands unrecognised DCS sequences here. We only care about sixel:
+ * DCS <Pa;Pb;Ph> q <data> ST, whose command bytes are optional numeric params
+ * (digits and ';') followed by the final 'q'. Other 'q'-terminated DCS queries
+ * carry an intermediate byte before the 'q' and must NOT be mistaken for sixel:
+ * XTGETTCAP is "+q" and DECRQSS is "$q" (the latter libvterm handles itself, so
+ * it never reaches us). Swallowing XTGETTCAP as sixel both decodes garbage and
+ * starves the inner app of its reply, hanging capability probes (e.g.
+ * notcurses). So require every byte before the 'q' to be a digit or ';'.
+ * Everything else is dropped (return 0). */
+static int cb_dcs(const char *command, size_t commandlen,
+		  VTermStringFragment frag, void *user)
 {
 	Window *w = user;
+	bool is_sixel = commandlen >= 1 && command[commandlen - 1] == 'q';
+	for (size_t i = 0; is_sixel && i + 1 < commandlen; i++) {
+		if (!((command[i] >= '0' && command[i] <= '9') ||
+		      command[i] == ';')) {
+			is_sixel = false;
+		}
+	}
+	if (!is_sixel) {
+		return 0;
+	}
+	sixel_accumulate(w, command, commandlen, frag.str, frag.len,
+			 frag.initial, frag.final);
+	return 1;
+}
+
+/* libvterm hands unrecognised CSI here. We only act on XTSMGRAPHICS
+ * (CSI ? Pi ; Pa ; Pv S), which apps use to probe sixel colour registers and
+ * the maximum image geometry; answer it only when we can display pixels.
+ * Everything else keeps libvterm's default (dropped). */
+static int cb_csi(const char *leader, const long args[], int argcount,
+		  const char *intermed, char command, void *user)
+{
+	Window *w = user;
+	if (command == 'S' && leader && leader[0] == '?' &&
+	    (!intermed || !intermed[0]) && argcount >= 2) {
+		if (w->wm && w->wm->pixel_ok) {
+			sixel_answer_xtsmgraphics(w, args, argcount);
+		}
+		return 1;
+	}
+	return 0;
+}
+
+static const VTermStateFallbacks state_fallbacks = {
+	.csi = cb_csi,
+	.dcs = cb_dcs,
+};
+
+/* Write a terminal->child reply (DA responses, cursor reports, the sixel probe
+ * answers below) to the PTY master, tolerating short writes; drops the tail
+ * rather than block on EAGAIN. */
+void vt_reply(Window *w, const char *bytes, size_t len)
+{
 	size_t off = 0;
 	while (off < len) {
-		ssize_t k = write(w->pty, s + off, len - off);
+		ssize_t k = write(w->pty, bytes + off, len - off);
 		if (k > 0) {
 			off += (size_t)k;
 		} else if (k < 0 && (errno == EINTR)) {
@@ -257,6 +314,39 @@ static void cb_output(const char *s, size_t len, void *user)
 			break;
 		}
 	}
+}
+
+/* Output callback: bytes the emulator wants to send back to the child. */
+static void cb_output(const char *s, size_t len, void *user)
+{
+	Window *w = user;
+
+	/* Advertise sixel to the inner app when the host can actually show pixels.
+	 * libvterm answers the primary DA query (CSI c) with ESC[?1;2c, a VT100-class
+	 * reply (leading '1') whose remaining parameters are an options bitmask, NOT
+	 * the parametric feature list of VT220+ terminals. The sixel attribute '4'
+	 * only has meaning in that VT220+ feature list, so we can't just splice ';4'
+	 * onto ESC[?1;2c: ESC[?1;2;4c is malformed, and strict DA1 parsers (notcurses
+	 * among them) fail to recognise it as a terminator and block forever waiting
+	 * for the reply. So replace the whole reply with a VT220-class DA1 that lists
+	 * sixel: ESC[?62;1;2;4c. */
+	static const char da1[] = "\x1b[?1;2c";
+	static const char da1_sixel[] = "\x1b[?62;1;2;4c";
+	const size_t dn = sizeof(da1) - 1;
+	bool advertise = w->wm && w->wm->pixel_ok;
+
+	size_t start = 0;
+	for (size_t i = 0; advertise && i + dn <= len;) {
+		if (memcmp(s + i, da1, dn) == 0) {
+			vt_reply(w, s + start, i - start);
+			vt_reply(w, da1_sixel, sizeof(da1_sixel) - 1);
+			i += dn;
+			start = i;
+		} else {
+			i++;
+		}
+	}
+	vt_reply(w, s + start, len - start);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -270,6 +360,7 @@ void vt_init(Window *w)
 
 	w->vts = vterm_obtain_screen(w->vt);
 	vterm_screen_set_callbacks(w->vts, &screen_cbs, w);
+	vterm_screen_set_unrecognised_fallbacks(w->vts, &state_fallbacks, w);
 	vterm_screen_reset(w->vts, 1);
 
 	vterm_output_set_callback(w->vt, cb_output, w);
@@ -285,6 +376,12 @@ void vt_feed(Window *w, const char *bytes, size_t n)
      * precise damage region is accumulated for us during this call; we only
      * flag dirty so the render pass knows to sweep. */
 	vterm_input_write(w->vt, bytes, n);
+	/* A sixel emitted during that parse defers its cursor advance to here so we
+	 * don't re-enter the parser from inside its own DCS callback. */
+	while (w->six_pending_lf > 0) {
+		vterm_input_write(w->vt, "\r\n", 2);
+		w->six_pending_lf--;
+	}
 	w->dirty = true;
 }
 
@@ -299,6 +396,9 @@ void vt_resize(Window *w, int rows, int cols)
 	/* Snap back to the live screen: the reflow that vterm_set_size triggers
      * makes a held scrollback offset meaningless. */
 	w->sb_offset = 0;
+	/* Reflow moves content in ways we can't track for fixed pixel placement,
+     * and the cell-pixel geometry may differ; drop the images. */
+	sixel_images_clear(w);
 	vterm_set_size(w->vt, rows, cols);
 	if (w->content) {
 		ncplane_resize_simple(w->content, (unsigned)rows,
@@ -377,6 +477,7 @@ void vt_set_scrollback_max(Window *w, int max)
 
 void vt_free(Window *w)
 {
+	sixel_window_free(w);
 	if (w->vt) {
 		vterm_free(w->vt);
 		w->vt = NULL;
@@ -747,6 +848,9 @@ void vt_render(Window *w)
 			}
 		}
 	}
+	/* Reposition any sixel images for the current scroll/scrollback state. */
+	sixel_reposition(w);
+
 	w->dirty = false;
 	w->dmg_all = false;
 	w->dmg_valid = false;

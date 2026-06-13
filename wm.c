@@ -37,6 +37,11 @@ void wm_init(WM *wm, struct notcurses *nc)
 	wm->mode = MODE_INTERPRET;
 	wm->needs_render = true; /* force the first frame */
 	wm->ptr_y = wm->ptr_x = -1; /* no software pointer placed yet */
+	/* Whether this terminal can render pixel bitmaps (sixel/kitty). Gates the
+     * whole sixel path; notcurses auto-detects the protocol, no init flag needed. */
+	int pximpl = notcurses_check_pixel_support(nc);
+	wm->pixel_ok = pximpl != NCPIXEL_NONE;
+	vp_log("pixel support: impl=%d pixel_ok=%d\n", pximpl, wm->pixel_ok);
 	config_load(&wm->config);
 	notcurses_stddim_yx(nc, &wm->scr_rows, &wm->scr_cols);
 
@@ -250,6 +255,10 @@ void wm_minimize(WM *wm, Window *win)
 	}
 	win->minimized = true;
 	vp_log("minimize id=%d\n", win->id);
+	/* Drop any image planes first: parking the frame off-screen would drag
+	 * their pixel bitmaps off-screen too, which scrolls some terminals. The
+	 * visuals are kept, so restore re-blits them. */
+	sixel_planes_drop(win);
 	/* Park the frame off-screen (content rides along as a bound child). */
 	ncplane_move_yx(win->frame, VP_HIDDEN_Y, win->x);
 

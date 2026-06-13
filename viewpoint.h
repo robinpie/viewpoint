@@ -187,10 +187,28 @@ typedef struct sb_line {
 	int cols;
 } sb_line;
 
+/* A decoded sixel image, composited as a notcurses pixel bitmap on its own
+ * ncplane (a child of the owning window's content plane). Anchored to an
+ * absolute scrollback row so it scrolls and persists with its text; the plane's
+ * pixels are blitted once and only its position is updated as the view moves. */
+typedef struct vp_image {
+	struct ncvisual *visual; /* decoded pixels, retained so the plane can be
+				  * re-blitted whenever the image is on-screen */
+	struct ncplane
+		*plane; /* NCBLIT_PIXEL child of Window.content; exists only
+				* while the image is visible (NULL when hidden) */
+	int64_t abs_row; /* absolute scrollback anchor of the top-left cell */
+	int col; /* anchor column (content-relative) */
+	int cell_h, cell_w; /* footprint in cells */
+} vp_image;
+
 typedef struct Window {
 	int id; /* stable, monotonic per session */
 	pid_t child; /* child shell pid */
 	int pty; /* PTY master fd (non-blocking) */
+
+	struct WM *
+		wm; /* owning WM (callbacks carry only Window*; sixel needs nc) */
 
 	VTerm *vt;
 	VTermScreen *vts;
@@ -233,6 +251,20 @@ typedef struct Window {
 	int sb_offset;
 	int sb_max; /* logical history cap for this window (from config) */
 	bool app_mouse; /* the inner app enabled mouse reporting (VTERM_PROP_MOUSE) */
+
+	/* Sixel graphics. scroll_base is the absolute index of the top live-screen
+	 * row (++ on sb_pushline, -- on sb_popline): the coordinate space images are
+	 * anchored in. sixbuf accumulates a sixel DCS payload across libvterm
+	 * fragments; images is the list of live image planes. See sixel.c. */
+	int64_t scroll_base;
+	char *sixbuf;
+	size_t sixlen, sixcap;
+	bool six_overflow; /* payload exceeded the cap; discard until the final frag */
+	int six_pending_lf; /* line feeds owed after an image, flushed by vt_feed
+			     * (feeding them inside the DCS callback would re-enter
+			     * the parser) */
+	vp_image *images;
+	int nimages, images_cap;
 
 	/* CLOCK_MONOTONIC (ns) before which window_refresh_title skips its /proc
      * poll - throttles title updates to VP_TITLE_POLL_MS. */
@@ -298,6 +330,8 @@ typedef struct Settings {
 typedef struct WM {
 	struct notcurses *nc;
 	struct ncplane *std; /* standard plane (background / desktop) */
+
+	bool pixel_ok; /* terminal supports pixel bitmaps (sixel/kitty) for graphics */
 
 	Window **wins;
 	int nwins;
@@ -456,6 +490,41 @@ void vt_mouse_move(Window *w, int row, int col, VTermModifier mod);
 void vt_mouse_button(Window *w, int button, bool pressed, VTermModifier mod);
 
 void vt_free(Window *w);
+
+/* Write a reply (DA/XTSMGRAPHICS responses) from the emulator back to the
+ * child on the PTY master. */
+void vt_reply(Window *w, const char *bytes, size_t len);
+
+/* ------------------------------------------------------------------------- */
+/* sixel.c                                                                   */
+/* ------------------------------------------------------------------------- */
+
+/* Accumulate one fragment of a sixel DCS payload (called from the libvterm DCS
+ * fallback). On the final fragment the image is decoded and composited. */
+void sixel_accumulate(Window *w, const char *command, size_t commandlen,
+		      const char *str, size_t len, bool initial, bool final);
+
+/* Reposition every live image plane from its absolute anchor to the current
+ * visible row (parking off-screen when not fully visible), and evict images that
+ * have scrolled out of retained history. Call once per render sweep. */
+void sixel_reposition(Window *w);
+
+/* Destroy every live image plane and reset the list (used on screen clear,
+ * resize, and teardown). */
+void sixel_images_clear(Window *w);
+
+/* Destroy the visible image planes but keep their visuals, so they re-blit on
+ * the next reposition. Used when a window is minimized: its frame parks
+ * off-screen, and a pixel bitmap dragged off-screen scrolls some terminals. */
+void sixel_planes_drop(Window *w);
+
+/* Free all per-window sixel state: the accumulation buffer and image planes. */
+void sixel_window_free(Window *w);
+
+/* Answer an XTSMGRAPHICS probe (CSI ? Pi ; Pa ; Pv S): report sixel colour
+ * registers (Pi=1) or maximum image geometry (Pi=2). Only called when the host
+ * terminal supports pixels. */
+void sixel_answer_xtsmgraphics(Window *w, const long *args, int argcount);
 
 /* ------------------------------------------------------------------------- */
 /* window.c                                                                  */

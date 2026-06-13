@@ -194,13 +194,21 @@ int main(void)
      * enables X11 press/release tracking (?1000h). On terminals where the
      * last-set mouse tracking mode wins (e.g. Konsole), that leaves us with
      * press/release only and no button-held motion - so drags don't update live.
-     * Render once so notcurses flushes its own mouse setup, then re-assert
-     * button-event (drag) tracking + SGR encoding so a motion-reporting mode is
-     * the active one. These xterm sequences are meaningless on the console. */
+     * Render once so notcurses flushes its own mouse setup, then re-assert a
+     * motion-reporting tracking mode so it's the active one.
+     *
+     * Re-assert ONLY the tracking modes (1002/1003) - never the report ENCODING.
+     * On terminals that support SGR-Pixels (?1016, e.g. foot, but not Konsole),
+     * notcurses negotiates pixel-coordinate mouse reports and divides them by the
+     * cell geometry itself. Forcing ?1006h here would flip the terminal back to
+     * cell-coordinate reports while notcurses still expected pixels - it would
+     * divide cell coords by the cell size and collapse every event into the
+     * top-left corner, i.e. a dead mouse. Leaving the encoding to notcurses keeps
+     * both the cell (1006) and pixel (1016) terminals working. These xterm
+     * sequences are meaningless on the console. */
 	wm_render(&wm);
 	if (!wm.console) {
-		static const char reassert[] =
-			"\x1b[?1002h\x1b[?1003h\x1b[?1006h";
+		static const char reassert[] = "\x1b[?1002h\x1b[?1003h";
 		ssize_t rc =
 			write(STDOUT_FILENO, reassert, sizeof(reassert) - 1);
 		(void)rc;

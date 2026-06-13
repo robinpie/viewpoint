@@ -58,6 +58,7 @@ Window *window_create(WM *wm, int x, int y, int w, int h)
 		return NULL;
 	}
 	win->id = wm->next_id++;
+	win->wm = wm; /* set early: vt_free in the error paths below needs it */
 	win->x = x;
 	win->y = y;
 	win->w = w;
@@ -158,6 +159,13 @@ void window_set_geometry(Window *win, int x, int y, int w, int h)
 		vt_resize(win, rows,
 			  cols); /* resizes content plane + emulator */
 		pty_set_winsize(win->pty, rows, cols);
+	}
+	/* A move slides the bound image planes along with the frame; re-evaluate
+	 * their visibility now (this re-render won't run vt_render otherwise) so an
+	 * image dragged past a screen edge has its bitmap destroyed rather than
+	 * pushed off-screen, which scrolls some terminals. */
+	if (win->nimages > 0) {
+		sixel_reposition(win);
 	}
 	win->frame_dirty = true;
 }

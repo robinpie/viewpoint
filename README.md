@@ -11,13 +11,13 @@ Early in development, things will change.
 ```sh
 make
 ```
-You need the development headers and libraries for notcurses, libvterm and GPM, plus a C toolchain with `forkpty` (from libutil, part of glibc).
+You need the development headers and libraries for notcurses, libvterm, libsixel and GPM, plus a C toolchain with `forkpty` (from libutil, part of glibc).
 
-On Arch Linux: `sudo pacman -S notcurses libvterm gpm base-devel`
+On Arch Linux: `sudo pacman -S notcurses libvterm libsixel gpm base-devel`
 
-On Debian: `sudo apt install libvterm-dev libgpm-dev build-essential cmake ninja-build libavdevice-dev libunistring-dev` (notcurses is not packaged in Debian 13, so install it from [source](https://github.com/dankamongmen/notcurses) and run `sudo ldconfig`, or wait for Debian 14)
+On Debian: `sudo apt install libvterm-dev libsixel-dev libgpm-dev build-essential cmake ninja-build libavdevice-dev libunistring-dev` (notcurses is not packaged in Debian 13, so install it from [source](https://github.com/dankamongmen/notcurses) and run `sudo ldconfig`, or wait for Debian 14)
 
-notcurses and libvterm are located via `pkg-config`. GPM is linked directly with `-lgpm`. For a mouse on the bare Linux console, you also need the `gpm` daemon running.
+notcurses, libvterm and libsixel are located via `pkg-config`. GPM is linked directly with `-lgpm`. For a mouse on the bare Linux console, you also need the `gpm` daemon running.
 
 ## Run
 
@@ -139,15 +139,22 @@ A chord is an optional `alt+`/`shift+`/`ctrl+` modifier prefix followed by a key
 
 The available actions are: `focus_next`, `focus_prev`, `new`, `close`, `minimize`, `maximize`, `move_left`/`move_right`/`move_up`/`move_down`, `resize_left`/`resize_right`/`resize_up`/`resize_down`, `scroll_up`/`scroll_down` (scroll the focused window's scrollback history), `slot1`…`slot9` (focus/restore the window in taskbar slot N), and `taskbar_left`/`taskbar_right` (scroll the taskbar's window slots).
 
+## Graphics
+
+viewpoint renders inline sixel images. This needs a terminal that itself supports sixel or kitty graphics. For technical reasons, graphics are re-composited, so viewpoint may take an inner application outputting sixel and reencode it as kitty depending on your terminal settings. On a terminal without graphics support, the sixel is silently dropped. 
+
+### Graphics limitations
+
+Resizing a window clears its images (the reflow can't be tracked for fixed-pixel placement), and an image only partway on-screen is hidden until it fully fits.
+
 ## Roadmap
 
-* sixel passthrough support
+* kitty graphics passthrough support
 * themes, including custom desktop backgrounds
 * viewpoint-native widget framework
 
 ### Maybes
 
-* Kitty graphics passthrough support
 * fake framebuffers for raw-framebuffer-writing graphics support?
 
 ## Acknowledgements
@@ -156,6 +163,7 @@ This project uses the following libraries:
 
 - [notcurses](https://github.com/dankamongmen/notcurses)
 - [libvterm](https://www.leonerd.org.uk/code/libvterm/)
+- [libsixel](https://github.com/saitoha/libsixel)
 - [GPM](https://www.nico.schottelius.org/software/gpm/)
 
 ---
