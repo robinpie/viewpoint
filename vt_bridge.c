@@ -292,8 +292,47 @@ static int cb_csi(const char *leader, const long args[], int argcount,
 	return 0;
 }
 
+/* libvterm hands unrecognised OSC here. We answer the dynamic-color *queries*
+ * OSC 10 (foreground), 11 (background) and 12 (cursor) with our window's default
+ * colors, in xterm's rgb:RRRR/GGGG/BBBB form. Apps use these to blend into the
+ * terminal background; notably lsix queries OSC 11 and, getting no answer,
+ * defaults to a white montage background (the wrong-background bug). A color-set
+ * request (payload other than "?") is consumed but ignored. Every other OSC
+ * keeps libvterm's default (dropped). */
+static int cb_osc(int command, VTermStringFragment frag, void *user)
+{
+	Window *w = user;
+	if (command != 10 && command != 11 && command != 12) {
+		return 0;
+	}
+	/* Only the single-fragment "?" query interests us. */
+	if (!frag.initial || !frag.final || frag.len < 1 ||
+	    frag.str[0] != '?') {
+		return 1;
+	}
+
+	VTermState *st = vterm_obtain_state(w->vt);
+	VTermColor fg, bg;
+	vterm_state_get_default_colors(st, &fg, &bg);
+	VTermColor c = (command == 10) ? fg : bg; /* cursor (12): reuse fg */
+	if (!VTERM_COLOR_IS_RGB(&c)) {
+		vterm_state_convert_color_to_rgb(st, &c);
+	}
+
+	/* 8-bit channels widened to 16-bit by replication (0xff -> 0xffff). */
+	char rsp[48];
+	int n = snprintf(rsp, sizeof rsp, "\x1b]%d;rgb:%04x/%04x/%04x\x1b\\",
+			 command, c.rgb.red * 0x101, c.rgb.green * 0x101,
+			 c.rgb.blue * 0x101);
+	if (n > 0 && n < (int)sizeof rsp) {
+		vt_reply(w, rsp, (size_t)n);
+	}
+	return 1;
+}
+
 static const VTermStateFallbacks state_fallbacks = {
 	.csi = cb_csi,
+	.osc = cb_osc,
 	.dcs = cb_dcs,
 };
 
