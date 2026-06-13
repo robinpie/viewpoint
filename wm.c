@@ -29,454 +29,468 @@
 
 void wm_init(WM *wm, struct notcurses *nc)
 {
-    memset(wm, 0, sizeof(*wm));
-    wm->nc = nc;
-    wm->std = notcurses_stdplane(nc);
-    wm->focused = -1;
-    wm->next_id = 1;
-    wm->mode = MODE_INTERPRET;
-    wm->needs_render = true;  /* force the first frame */
-    wm->ptr_y = wm->ptr_x = -1; /* no software pointer placed yet */
-    config_load(&wm->config);
-    notcurses_stddim_yx(nc, &wm->scr_rows, &wm->scr_cols);
+	memset(wm, 0, sizeof(*wm));
+	wm->nc = nc;
+	wm->std = notcurses_stdplane(nc);
+	wm->focused = -1;
+	wm->next_id = 1;
+	wm->mode = MODE_INTERPRET;
+	wm->needs_render = true; /* force the first frame */
+	wm->ptr_y = wm->ptr_x = -1; /* no software pointer placed yet */
+	config_load(&wm->config);
+	notcurses_stddim_yx(nc, &wm->scr_rows, &wm->scr_cols);
 
-    /* Desktop background: a dim field so floating windows stand out. */
-    uint64_t ch = 0;
-    ncchannels_set_fg_rgb8(&ch, 0x40, 0x44, 0x4c);
-    ncchannels_set_bg_rgb8(&ch, 0x10, 0x12, 0x16);
-    ncplane_set_base(wm->std, "·", 0, ch);
+	/* Desktop background: a dim field so floating windows stand out. */
+	uint64_t ch = 0;
+	ncchannels_set_fg_rgb8(&ch, 0x40, 0x44, 0x4c);
+	ncchannels_set_bg_rgb8(&ch, 0x10, 0x12, 0x16);
+	ncplane_set_base(wm->std, "·", 0, ch);
 
-    /* TERM=linux means the bare Linux console: we drive GPM ourselves (see
+	/* TERM=linux means the bare Linux console: we drive GPM ourselves (see
      * main.c) and must draw a software pointer, because gpm's own pointer is a
      * cell inversion that our full-screen repaint immediately overwrites. In a
      * GUI terminal the emulator renders the real mouse cursor for us. */
-    const char *term = getenv("TERM");
-    wm->console = term && strncmp(term, "linux", 5) == 0;
-    wm->draw_cursor = wm->console;
-    if (wm->draw_cursor) {
-        ncplane_options o = {0};
-        o.rows = 1;
-        o.cols = 1;
-        wm->cursor = ncplane_create(wm->std, &o);
-        if (wm->cursor) {
-            uint64_t cc = 0;
-            ncchannels_set_fg_rgb8(&cc, 0xff, 0xff, 0xff);
-            ncchannels_set_bg_rgb8(&cc, 0x00, 0x00, 0x00);
-            /* A solid block is unambiguous and always present in console fonts. */
-            ncplane_set_channels(wm->cursor, cc);
-            ncplane_putstr_yx(wm->cursor, 0, 0, "█");
-            ncplane_move_top(wm->cursor);
-        } else {
-            wm->draw_cursor = false;
-        }
-    }
+	const char *term = getenv("TERM");
+	wm->console = term && strncmp(term, "linux", 5) == 0;
+	wm->draw_cursor = wm->console;
+	if (wm->draw_cursor) {
+		ncplane_options o = { 0 };
+		o.rows = 1;
+		o.cols = 1;
+		wm->cursor = ncplane_create(wm->std, &o);
+		if (wm->cursor) {
+			uint64_t cc = 0;
+			ncchannels_set_fg_rgb8(&cc, 0xff, 0xff, 0xff);
+			ncchannels_set_bg_rgb8(&cc, 0x00, 0x00, 0x00);
+			/* A solid block is unambiguous and always present in console fonts. */
+			ncplane_set_channels(wm->cursor, cc);
+			ncplane_putstr_yx(wm->cursor, 0, 0, "█");
+			ncplane_move_top(wm->cursor);
+		} else {
+			wm->draw_cursor = false;
+		}
+	}
 }
 
 void wm_set_mouse_pos(WM *wm, int y, int x)
 {
-    wm->mouse_y = y;
-    wm->mouse_x = x;
+	wm->mouse_y = y;
+	wm->mouse_x = x;
 }
 
 bool wm_add_window(WM *wm, Window *win)
 {
-    if (wm->nwins == wm->cap) {
-        int ncap = wm->cap ? wm->cap * 2 : 8;
-        Window **n = realloc(wm->wins, (size_t)ncap * sizeof(*n));
-        if (!n) {
-            return false; /* caller owns `win` and must tear it down */
-        }
-        wm->wins = n;
-        wm->cap = ncap;
-    }
-    wm->wins[wm->nwins++] = win;
-    wm->taskbar_dirty = true;
-    return true;
+	if (wm->nwins == wm->cap) {
+		int ncap = wm->cap ? wm->cap * 2 : 8;
+		Window **n = realloc(wm->wins, (size_t)ncap * sizeof(*n));
+		if (!n) {
+			return false; /* caller owns `win` and must tear it down */
+		}
+		wm->wins = n;
+		wm->cap = ncap;
+	}
+	wm->wins[wm->nwins++] = win;
+	wm->taskbar_dirty = true;
+	return true;
 }
 
 void wm_remove_window(WM *wm, Window *win)
 {
-    int idx = wm_index_of(wm, win);
-    if (idx < 0) {
-        return;
-    }
-    for (int i = idx; i < wm->nwins - 1; i++) {
-        wm->wins[i] = wm->wins[i + 1];
-    }
-    wm->nwins--;
-    wm->taskbar_dirty = true;
+	int idx = wm_index_of(wm, win);
+	if (idx < 0) {
+		return;
+	}
+	for (int i = idx; i < wm->nwins - 1; i++) {
+		wm->wins[i] = wm->wins[i + 1];
+	}
+	wm->nwins--;
+	wm->taskbar_dirty = true;
 
-    /* Fix up the focused index. */
-    if (wm->nwins == 0) {
-        wm->focused = -1;
-    } else if (wm->focused == idx) {
-        /* focus the now-topmost remaining window */
-        wm->focused = -1;
-        /* pick the highest-z non-minimized window */
-        for (struct ncplane *p = notcurses_top(wm->nc); p; p = ncplane_below(p)) {
-            Window *cand = ncplane_userptr(p);
-            for (int i = 0; i < wm->nwins; i++) {
-                if (wm->wins[i] == cand && !cand->minimized) {
-                    wm_focus_index(wm, i);
-                    break;
-                }
-            }
-            if (wm->focused >= 0) {
-                break;
-            }
-        }
-        if (wm->focused < 0 && wm->nwins > 0) {
-            wm_focus_index(wm, wm->nwins - 1);
-        }
-    } else if (wm->focused > idx) {
-        wm->focused--;
-    }
+	/* Fix up the focused index. */
+	if (wm->nwins == 0) {
+		wm->focused = -1;
+	} else if (wm->focused == idx) {
+		/* focus the now-topmost remaining window */
+		wm->focused = -1;
+		/* pick the highest-z non-minimized window */
+		for (struct ncplane *p = notcurses_top(wm->nc); p;
+		     p = ncplane_below(p)) {
+			Window *cand = ncplane_userptr(p);
+			for (int i = 0; i < wm->nwins; i++) {
+				if (wm->wins[i] == cand && !cand->minimized) {
+					wm_focus_index(wm, i);
+					break;
+				}
+			}
+			if (wm->focused >= 0) {
+				break;
+			}
+		}
+		if (wm->focused < 0 && wm->nwins > 0) {
+			wm_focus_index(wm, wm->nwins - 1);
+		}
+	} else if (wm->focused > idx) {
+		wm->focused--;
+	}
 }
 
 int wm_index_of(WM *wm, const Window *win)
 {
-    for (int i = 0; i < wm->nwins; i++) {
-        if (wm->wins[i] == win) {
-            return i;
-        }
-    }
-    return -1;
+	for (int i = 0; i < wm->nwins; i++) {
+		if (wm->wins[i] == win) {
+			return i;
+		}
+	}
+	return -1;
 }
 
 Window *wm_focused(WM *wm)
 {
-    if (wm->focused < 0 || wm->focused >= wm->nwins) {
-        return NULL;
-    }
-    return wm->wins[wm->focused];
+	if (wm->focused < 0 || wm->focused >= wm->nwins) {
+		return NULL;
+	}
+	return wm->wins[wm->focused];
 }
 
 void wm_focus_index(WM *wm, int idx)
 {
-    if (idx < 0 || idx >= wm->nwins) {
-        return;
-    }
-    Window *prev = wm_focused(wm);
-    Window *win = wm->wins[idx];
+	if (idx < 0 || idx >= wm->nwins) {
+		return;
+	}
+	Window *prev = wm_focused(wm);
+	Window *win = wm->wins[idx];
 
-    wm->focused = idx;
-    vp_log("focus id=%d idx=%d\n", win->id, idx);
-    /* Raise the focused frame and its bound content to the top. */
-    ncplane_move_family_top(win->frame);
+	wm->focused = idx;
+	vp_log("focus id=%d idx=%d\n", win->id, idx);
+	/* Raise the focused frame and its bound content to the top. */
+	ncplane_move_family_top(win->frame);
 
-    if (prev && prev != win) {
-        prev->frame_dirty = true;
-    }
-    win->frame_dirty = true;
-    wm->taskbar_dirty = true;
+	if (prev && prev != win) {
+		prev->frame_dirty = true;
+	}
+	win->frame_dirty = true;
+	wm->taskbar_dirty = true;
 
-    /* Scroll the taskbar so the newly focused window's slot is visible. */
-    taskbar_reveal(wm, idx);
+	/* Scroll the taskbar so the newly focused window's slot is visible. */
+	taskbar_reveal(wm, idx);
 
-    /* Keep the taskbar above all windows. */
-    if (wm->taskbar) {
-        ncplane_move_top(wm->taskbar);
-    }
+	/* Keep the taskbar above all windows. */
+	if (wm->taskbar) {
+		ncplane_move_top(wm->taskbar);
+	}
 }
 
 void wm_focus_window(WM *wm, Window *win)
 {
-    int idx = wm_index_of(wm, win);
-    if (idx >= 0) {
-        wm_focus_index(wm, idx);
-    }
+	int idx = wm_index_of(wm, win);
+	if (idx >= 0) {
+		wm_focus_index(wm, idx);
+	}
 }
 
 void wm_focus_next(WM *wm, int dir)
 {
-    if (wm->nwins == 0) {
-        return;
-    }
-    int start = wm->focused < 0 ? 0 : wm->focused;
-    for (int step = 1; step <= wm->nwins; step++) {
-        int i = ((start + dir * step) % wm->nwins + wm->nwins) % wm->nwins;
-        if (!wm->wins[i]->minimized) {
-            wm_focus_index(wm, i);
-            return;
-        }
-    }
+	if (wm->nwins == 0) {
+		return;
+	}
+	int start = wm->focused < 0 ? 0 : wm->focused;
+	for (int step = 1; step <= wm->nwins; step++) {
+		int i = ((start + dir * step) % wm->nwins + wm->nwins) %
+			wm->nwins;
+		if (!wm->wins[i]->minimized) {
+			wm_focus_index(wm, i);
+			return;
+		}
+	}
 }
 
 Window *wm_spawn_window(WM *wm)
 {
-    /* Cascade new windows from the top-left, but clear of the desktop settings
+	/* Cascade new windows from the top-left, but clear of the desktop settings
      * icon (which sits in roughly the leftmost ~13 columns). */
-    int n = wm->nwins;
-    int x = 16 + (n % 6) * 4;
-    int y = 1 + (n % 6) * 2;
-    int w = (int)wm->scr_cols * 2 / 3;
-    int h = (int)wm->scr_rows * 2 / 3;
-    if (w < VP_MIN_W * 2) w = (int)wm->scr_cols - x - 1;
-    if (h < VP_MIN_H * 2) h = (int)wm->scr_rows - y - 1;
+	int n = wm->nwins;
+	int x = 16 + (n % 6) * 4;
+	int y = 1 + (n % 6) * 2;
+	int w = (int)wm->scr_cols * 2 / 3;
+	int h = (int)wm->scr_rows * 2 / 3;
+	if (w < VP_MIN_W * 2)
+		w = (int)wm->scr_cols - x - 1;
+	if (h < VP_MIN_H * 2)
+		h = (int)wm->scr_rows - y - 1;
 
-    Window *win = window_create(wm, x, y, w, h);
-    if (!win) {
-        return NULL;
-    }
-    if (!wm_add_window(wm, win)) {
-        /* Couldn't grow the window list: destroy the orphan (plane + child)
+	Window *win = window_create(wm, x, y, w, h);
+	if (!win) {
+		return NULL;
+	}
+	if (!wm_add_window(wm, win)) {
+		/* Couldn't grow the window list: destroy the orphan (plane + child)
          * rather than leak it and operate on an untracked window. */
-        window_destroy(wm, win);
-        return NULL;
-    }
-    wm_clamp_onscreen(wm, win);
-    wm_focus_window(wm, win);
-    vp_log("spawn id=%d nwins=%d\n", win->id, wm->nwins);
-    return win;
+		window_destroy(wm, win);
+		return NULL;
+	}
+	wm_clamp_onscreen(wm, win);
+	wm_focus_window(wm, win);
+	vp_log("spawn id=%d nwins=%d\n", win->id, wm->nwins);
+	return win;
 }
 
 void wm_close_focused(WM *wm)
 {
-    Window *win = wm_focused(wm);
-    if (win) {
-        win->dead = true; /* destroyed at end of the loop pass */
-        vp_log("close id=%d\n", win->id);
-    }
+	Window *win = wm_focused(wm);
+	if (win) {
+		win->dead = true; /* destroyed at end of the loop pass */
+		vp_log("close id=%d\n", win->id);
+	}
 }
 
 void wm_minimize(WM *wm, Window *win)
 {
-    if (!win || win->minimized) {
-        return;
-    }
-    win->minimized = true;
-    vp_log("minimize id=%d\n", win->id);
-    /* Park the frame off-screen (content rides along as a bound child). */
-    ncplane_move_yx(win->frame, VP_HIDDEN_Y, win->x);
+	if (!win || win->minimized) {
+		return;
+	}
+	win->minimized = true;
+	vp_log("minimize id=%d\n", win->id);
+	/* Park the frame off-screen (content rides along as a bound child). */
+	ncplane_move_yx(win->frame, VP_HIDDEN_Y, win->x);
 
-    if (wm_focused(wm) == win) {
-        /* shift focus to the next visible window */
-        wm->focused = -1;
-        for (int i = 0; i < wm->nwins; i++) {
-            if (!wm->wins[i]->minimized) {
-                wm_focus_index(wm, i);
-                break;
-            }
-        }
-    }
-    wm->taskbar_dirty = true;
+	if (wm_focused(wm) == win) {
+		/* shift focus to the next visible window */
+		wm->focused = -1;
+		for (int i = 0; i < wm->nwins; i++) {
+			if (!wm->wins[i]->minimized) {
+				wm_focus_index(wm, i);
+				break;
+			}
+		}
+	}
+	wm->taskbar_dirty = true;
 }
 
 void wm_restore(WM *wm, Window *win)
 {
-    if (!win || !win->minimized) {
-        return;
-    }
-    win->minimized = false;
-    vp_log("restore id=%d\n", win->id);
-    ncplane_move_yx(win->frame, win->y, win->x);
-    win->frame_dirty = true;
-    win->dirty = true;
-    wm_focus_window(wm, win);
-    wm->taskbar_dirty = true;
+	if (!win || !win->minimized) {
+		return;
+	}
+	win->minimized = false;
+	vp_log("restore id=%d\n", win->id);
+	ncplane_move_yx(win->frame, win->y, win->x);
+	win->frame_dirty = true;
+	win->dirty = true;
+	wm_focus_window(wm, win);
+	wm->taskbar_dirty = true;
 }
 
 void wm_toggle_maximize(WM *wm, Window *win)
 {
-    if (!win) {
-        return;
-    }
-    int avail_h = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
-    vp_log("maxtoggle id=%d was_max=%d\n", win->id, win->maximized);
-    if (!win->maximized) {
-        win->sx = win->x;
-        win->sy = win->y;
-        win->sw = win->w;
-        win->sh = win->h;
-        win->maximized = true;
-        window_set_geometry(win, 0, 0, (int)wm->scr_cols, avail_h);
-    } else {
-        win->maximized = false;
-        window_set_geometry(win, win->sx, win->sy, win->sw, win->sh);
-    }
-    win->dirty = true;
+	if (!win) {
+		return;
+	}
+	int avail_h = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
+	vp_log("maxtoggle id=%d was_max=%d\n", win->id, win->maximized);
+	if (!win->maximized) {
+		win->sx = win->x;
+		win->sy = win->y;
+		win->sw = win->w;
+		win->sh = win->h;
+		win->maximized = true;
+		window_set_geometry(win, 0, 0, (int)wm->scr_cols, avail_h);
+	} else {
+		win->maximized = false;
+		window_set_geometry(win, win->sx, win->sy, win->sw, win->sh);
+	}
+	win->dirty = true;
 }
 
 void wm_move_focused(WM *wm, int dx, int dy)
 {
-    Window *win = wm_focused(wm);
-    if (!win || win->minimized) {
-        return;
-    }
-    if (win->maximized) {
-        win->maximized = false; /* moving un-maximizes */
-    }
-    window_set_geometry(win, win->x + dx, win->y + dy, win->w, win->h);
-    wm_clamp_onscreen(wm, win);
+	Window *win = wm_focused(wm);
+	if (!win || win->minimized) {
+		return;
+	}
+	if (win->maximized) {
+		win->maximized = false; /* moving un-maximizes */
+	}
+	window_set_geometry(win, win->x + dx, win->y + dy, win->w, win->h);
+	wm_clamp_onscreen(wm, win);
 }
 
 void wm_resize_focused(WM *wm, int dw, int dh)
 {
-    Window *win = wm_focused(wm);
-    if (!win || win->minimized) {
-        return;
-    }
-    if (win->maximized) {
-        win->maximized = false;
-    }
-    window_set_geometry(win, win->x, win->y, win->w + dw, win->h + dh);
-    wm_clamp_onscreen(wm, win);
+	Window *win = wm_focused(wm);
+	if (!win || win->minimized) {
+		return;
+	}
+	if (win->maximized) {
+		win->maximized = false;
+	}
+	window_set_geometry(win, win->x, win->y, win->w + dw, win->h + dh);
+	wm_clamp_onscreen(wm, win);
 }
 
 void wm_clamp_onscreen(WM *wm, Window *win)
 {
-    int maxw = (int)wm->scr_cols;
-    int maxh = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
+	int maxw = (int)wm->scr_cols;
+	int maxh = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
 
-    int w = win->w, h = win->h;
-    if (w > maxw) w = maxw;
-    if (h > maxh) h = maxh;
+	int w = win->w, h = win->h;
+	if (w > maxw)
+		w = maxw;
+	if (h > maxh)
+		h = maxh;
 
-    int x = win->x, y = win->y;
-    if (x + w > maxw) x = maxw - w;
-    if (y + h > maxh) y = maxh - h;
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
+	int x = win->x, y = win->y;
+	if (x + w > maxw)
+		x = maxw - w;
+	if (y + h > maxh)
+		y = maxh - h;
+	if (x < 0)
+		x = 0;
+	if (y < 0)
+		y = 0;
 
-    if (x != win->x || y != win->y || w != win->w || h != win->h) {
-        window_set_geometry(win, x, y, w, h);
-    }
+	if (x != win->x || y != win->y || w != win->w || h != win->h) {
+		window_set_geometry(win, x, y, w, h);
+	}
 }
 
 void wm_handle_resize(WM *wm)
 {
-    notcurses_refresh(wm->nc, NULL, NULL);
-    notcurses_stddim_yx(wm->nc, &wm->scr_rows, &wm->scr_cols);
+	notcurses_refresh(wm->nc, NULL, NULL);
+	notcurses_stddim_yx(wm->nc, &wm->scr_rows, &wm->scr_cols);
 
-    if (wm->taskbar) {
-        taskbar_reflow(wm);
-    }
-    settings_icon_reflow(wm); /* keep the launcher icon on-screen */
-    exit_icon_reflow(wm); /* re-anchor to the new bottom-right corner */
-    for (int i = 0; i < wm->nwins; i++) {
-        Window *win = wm->wins[i];
-        if (win->maximized) {
-            int avail_h = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
-            window_set_geometry(win, 0, 0, (int)wm->scr_cols, avail_h);
-        } else if (!win->minimized) {
-            wm_clamp_onscreen(wm, win);
-        }
-        win->dirty = true;
-        win->frame_dirty = true;
-    }
-    wm->taskbar_dirty = true;
-    if (wm->settings.open) {
-        wm->settings.dirty = true; /* re-center/redraw the panel for the new size */
-    }
+	if (wm->taskbar) {
+		taskbar_reflow(wm);
+	}
+	settings_icon_reflow(wm); /* keep the launcher icon on-screen */
+	exit_icon_reflow(wm); /* re-anchor to the new bottom-right corner */
+	for (int i = 0; i < wm->nwins; i++) {
+		Window *win = wm->wins[i];
+		if (win->maximized) {
+			int avail_h = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
+			window_set_geometry(win, 0, 0, (int)wm->scr_cols,
+					    avail_h);
+		} else if (!win->minimized) {
+			wm_clamp_onscreen(wm, win);
+		}
+		win->dirty = true;
+		win->frame_dirty = true;
+	}
+	wm->taskbar_dirty = true;
+	if (wm->settings.open) {
+		wm->settings.dirty =
+			true; /* re-center/redraw the panel for the new size */
+	}
 }
 
 Window *wm_window_at(WM *wm, int y, int x)
 {
-    /* Walk the pile from top to bottom; first frame that contains (y,x) and
+	/* Walk the pile from top to bottom; first frame that contains (y,x) and
      * isn't minimized wins. */
-    for (struct ncplane *p = notcurses_top(wm->nc); p; p = ncplane_below(p)) {
-        Window *win = ncplane_userptr(p);
-        if (!win) {
-            continue;
-        }
-        /* userptr is only set on frame planes; confirm it's a live window */
-        if (win->frame != p || win->minimized) {
-            continue;
-        }
-        if (y >= win->y && y < win->y + win->h &&
-            x >= win->x && x < win->x + win->w) {
-            return win;
-        }
-    }
-    return NULL;
+	for (struct ncplane *p = notcurses_top(wm->nc); p;
+	     p = ncplane_below(p)) {
+		Window *win = ncplane_userptr(p);
+		if (!win) {
+			continue;
+		}
+		/* userptr is only set on frame planes; confirm it's a live window */
+		if (win->frame != p || win->minimized) {
+			continue;
+		}
+		if (y >= win->y && y < win->y + win->h && x >= win->x &&
+		    x < win->x + win->w) {
+			return win;
+		}
+	}
+	return NULL;
 }
 
 void wm_render(WM *wm)
 {
-    /* Track whether anything actually changed this pass; if not, we skip the
+	/* Track whether anything actually changed this pass; if not, we skip the
      * (expensive) notcurses_render entirely. needs_render carries signals from
      * mutations that move planes without a per-object dirty flag (dragged icons,
      * the snap outline, a closed settings panel). */
-    bool drew = wm->needs_render;
-    wm->needs_render = false;
+	bool drew = wm->needs_render;
+	wm->needs_render = false;
 
-    for (int i = 0; i < wm->nwins; i++) {
-        Window *win = wm->wins[i];
-        /* Keep titles in step with the running program / shell cwd. Done for
+	for (int i = 0; i < wm->nwins; i++) {
+		Window *win = wm->wins[i];
+		/* Keep titles in step with the running program / shell cwd. Done for
          * every window (not just visible ones) so the taskbar stays accurate. */
-        if (window_refresh_title(win)) {
-            wm->taskbar_dirty = true;
-        }
-        if (win->minimized) {
-            continue;
-        }
-        if (win->frame_dirty) {
-            window_draw_frame(wm, win);
-            drew = true;
-        }
-        if (win->dirty) {
-            vt_render(win);
-            drew = true;
-        }
-    }
+		if (window_refresh_title(win)) {
+			wm->taskbar_dirty = true;
+		}
+		if (win->minimized) {
+			continue;
+		}
+		if (win->frame_dirty) {
+			window_draw_frame(wm, win);
+			drew = true;
+		}
+		if (win->dirty) {
+			vt_render(win);
+			drew = true;
+		}
+	}
 
-    if (wm->taskbar && wm->taskbar_dirty) {
-        taskbar_draw(wm);
-        drew = true;
-    }
+	if (wm->taskbar && wm->taskbar_dirty) {
+		taskbar_draw(wm);
+		drew = true;
+	}
 
-    if (settings_render(wm)) {
-        drew = true;
-    }
+	if (settings_render(wm)) {
+		drew = true;
+	}
 
-    /* Inner cursor only for the focused window (suppressed while the modal
+	/* Inner cursor only for the focused window (suppressed while the modal
      * settings editor is up). Compute the desired state, then compare against
      * what we last applied: a bare cursor move (no content damage) still needs a
      * render, while a pass that changes nothing visible can be skipped. */
-    Window *f = wm_focused(wm);
-    bool want_cursor = (!wm->settings.open && f && !f->minimized && f->cursor_visible &&
-        f->sb_offset == 0 &&
-        f->currow >= 0 && f->currow < f->rows &&
-        f->curcol >= 0 && f->curcol < f->cols);
-    int cy = 0, cx = 0;
-    if (want_cursor) {
-        int ay, ax;
-        ncplane_abs_yx(f->content, &ay, &ax);
-        cy = ay + f->currow;
-        cx = ax + f->curcol;
-    }
-    if (want_cursor != wm->cursor_on ||
-        (want_cursor && (cy != wm->cursor_y || cx != wm->cursor_x))) {
-        drew = true;
-    }
+	Window *f = wm_focused(wm);
+	bool want_cursor = (!wm->settings.open && f && !f->minimized &&
+			    f->cursor_visible && f->sb_offset == 0 &&
+			    f->currow >= 0 && f->currow < f->rows &&
+			    f->curcol >= 0 && f->curcol < f->cols);
+	int cy = 0, cx = 0;
+	if (want_cursor) {
+		int ay, ax;
+		ncplane_abs_yx(f->content, &ay, &ax);
+		cy = ay + f->currow;
+		cx = ax + f->curcol;
+	}
+	if (want_cursor != wm->cursor_on ||
+	    (want_cursor && (cy != wm->cursor_y || cx != wm->cursor_x))) {
+		drew = true;
+	}
 
-    /* Software pointer (console only): a hover move shifts the cell it sits on. */
-    bool want_ptr = wm->draw_cursor && wm->cursor;
-    if (want_ptr && (wm->mouse_y != wm->ptr_y || wm->mouse_x != wm->ptr_x)) {
-        drew = true;
-    }
+	/* Software pointer (console only): a hover move shifts the cell it sits on. */
+	bool want_ptr = wm->draw_cursor && wm->cursor;
+	if (want_ptr &&
+	    (wm->mouse_y != wm->ptr_y || wm->mouse_x != wm->ptr_x)) {
+		drew = true;
+	}
 
-    if (!drew) {
-        return; /* nothing changed; don't pay for a render */
-    }
+	if (!drew) {
+		return; /* nothing changed; don't pay for a render */
+	}
 
-    if (want_cursor) {
-        notcurses_cursor_enable(wm->nc, cy, cx);
-    } else {
-        notcurses_cursor_disable(wm->nc);
-    }
-    wm->cursor_on = want_cursor;
-    wm->cursor_y = cy;
-    wm->cursor_x = cx;
+	if (want_cursor) {
+		notcurses_cursor_enable(wm->nc, cy, cx);
+	} else {
+		notcurses_cursor_disable(wm->nc);
+	}
+	wm->cursor_on = want_cursor;
+	wm->cursor_y = cy;
+	wm->cursor_x = cx;
 
-    /* Park the software pointer over the last mouse cell, on top of everything
+	/* Park the software pointer over the last mouse cell, on top of everything
      * else (taskbar/settings raise themselves, so re-assert top each frame). */
-    if (want_ptr) {
-        ncplane_move_yx(wm->cursor, wm->mouse_y, wm->mouse_x);
-        ncplane_move_top(wm->cursor);
-        wm->ptr_y = wm->mouse_y;
-        wm->ptr_x = wm->mouse_x;
-    }
+	if (want_ptr) {
+		ncplane_move_yx(wm->cursor, wm->mouse_y, wm->mouse_x);
+		ncplane_move_top(wm->cursor);
+		wm->ptr_y = wm->mouse_y;
+		wm->ptr_x = wm->mouse_x;
+	}
 
-    notcurses_render(wm->nc);
+	notcurses_render(wm->nc);
 }

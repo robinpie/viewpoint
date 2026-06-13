@@ -160,4 +160,4 @@ This project uses the following libraries:
 
 ---
 
-This project is licensed under the GNU General Public License v3.0. See the LICENSE file for details.
+This project is licensed under the GNU General Public License v3.0. See the LICENSE file for details. We also use the Linux kernel's `.clang-format` (GPLv2).
