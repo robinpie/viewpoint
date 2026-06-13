@@ -513,6 +513,12 @@ void sixel_reposition(Window *w);
  * resize, and teardown). */
 void sixel_images_clear(Window *w);
 
+/* The inner app overwrote live-screen cells in [row0,row1) x [col0,col1) (a
+ * clear, an alt-screen switch, a TUI redraw). Drop any image whose footprint
+ * intersects that rectangle, so rewritten text shows through instead of stale
+ * pixels. Coordinates are live-screen rows/cols. */
+void sixel_damage(Window *w, int row0, int row1, int col0, int col1);
+
 /* Destroy the visible image planes but keep their visuals, so they re-blit on
  * the next reposition. Used when a window is minimized: its frame parks
  * off-screen, and a pixel bitmap dragged off-screen scrolls some terminals. */

@@ -65,6 +65,10 @@ static int cb_damage(VTermRect rect, void *user)
 {
 	Window *w = user;
 	dmg_add_rows(w, rect.start_row, rect.end_row);
+	/* Rewritten cells discard any sixel covering them (clears, alt-screen
+	 * switches, TUI redraws). Scroll damage comes via moverect, not here. */
+	sixel_damage(w, rect.start_row, rect.end_row, rect.start_col,
+		     rect.end_col);
 	w->dirty = true;
 	return 1;
 }

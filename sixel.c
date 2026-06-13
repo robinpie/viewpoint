@@ -168,6 +168,29 @@ void sixel_images_clear(Window *w)
 	w->nimages = 0;
 }
 
+/* The inner app overwrote a region of the live screen (a clear, an alt-screen
+ * switch, a TUI redraw). Any image whose on-screen cells intersect the damaged
+ * rectangle is now stale - the text underneath is meant to show through - so
+ * drop it, mirroring how a real sixel terminal discards pixels under rewritten
+ * cells. Damage from scrolling arrives via moverect (a full repaint), not here,
+ * so scrolled images are preserved and merely repositioned. */
+void sixel_damage(Window *w, int row0, int row1, int col0, int col1)
+{
+	for (int i = 0; i < w->nimages;) {
+		vp_image *img = &w->images[i];
+		int lr0 = (int)(img->abs_row - w->scroll_base);
+		int lr1 = lr0 + img->cell_h;
+		bool row_hit = lr0 < row1 && row0 < lr1;
+		bool col_hit =
+			img->col < col1 && col0 < img->col + img->cell_w;
+		if (row_hit && col_hit) {
+			image_drop(w, i); /* compacts the list; don't advance i */
+			continue;
+		}
+		i++;
+	}
+}
+
 void sixel_planes_drop(Window *w)
 {
 	bool any = false;
