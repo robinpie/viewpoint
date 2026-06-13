@@ -341,6 +341,7 @@ void sixel_reposition(Window *w)
 	int ay = 0, ax = 0;
 	ncplane_abs_yx(w->content, &ay, &ax);
 	int scr_rows = w->wm ? (int)w->wm->scr_rows : w->rows;
+	int scr_cols = w->wm ? (int)w->wm->scr_cols : w->cols;
 
 	for (int i = 0; i < w->nimages;) {
 		vp_image *img = &w->images[i];
@@ -351,15 +352,23 @@ void sixel_reposition(Window *w)
 		int r = (int)(img->abs_row - top_abs);
 		int top_screen = ay + r;
 		int bot_screen = ay + r + img->cell_h; /* exclusive */
-		/* Show only when the bitmap fits wholly inside the content rows and
+		int left_screen = ax + img->col;
+		int right_screen = ax + img->col + img->cell_w; /* exclusive */
+		/* Show only when the bitmap fits wholly inside the content cells and
 		 * inside the screen (off the last physical row). Planes aren't
 		 * scissored to the content plane, so a partial would spill over the
 		 * frame/taskbar; and a pixel bitmap placed off-screen makes some
-		 * terminals scroll the whole display. So rather than move a hidden
-		 * bitmap off-screen, we destroy its plane and re-blit from the
-		 * retained visual when it scrolls back into view. */
+		 * terminals scroll the whole display. The column bounds matter as much
+		 * as the rows: img->col is relative to the content plane, so dragging
+		 * the window past the left screen edge pushes the bitmap to a negative
+		 * absolute x (off-screen) even though its content-relative column never
+		 * changes. So rather than move a hidden bitmap off-screen, we destroy
+		 * its plane and re-blit from the retained visual when it comes back
+		 * fully into view. */
 		bool visible = r >= 0 && r + img->cell_h <= w->rows &&
-			       top_screen >= 0 && bot_screen < scr_rows;
+			       img->col >= 0 && img->col + img->cell_w <= w->cols &&
+			       top_screen >= 0 && bot_screen < scr_rows &&
+			       left_screen >= 0 && right_screen <= scr_cols;
 		if (visible) {
 			if (img->plane) {
 				ncplane_move_yx(img->plane, r, img->col);
