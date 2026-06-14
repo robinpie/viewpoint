@@ -143,11 +143,11 @@ The available actions are: `focus_next`, `focus_prev`, `new`, `close`, `minimize
 
 ## Graphics
 
-viewpoint renders inline sixel images (but it's still kinda busted, working on this). This needs a terminal that itself supports sixel or kitty graphics. For technical reasons, graphics are re-composited, so viewpoint may take an inner application outputting sixel and reencode it as kitty depending on your terminal settings. On a terminal without graphics support, the sixel is silently dropped. 
+viewpoint renders inline sixel images (but it's still kinda busted, working on this. sixels MAY mess up your state right now). This needs a terminal that itself supports sixel or kitty graphics. For technical reasons, graphics are re-composited, so viewpoint may take an inner application outputting sixel and reencode it as kitty depending on your terminal settings. On a terminal without graphics support, the sixel is silently dropped. 
 
 ### Graphics limitations
 
-Resizing a window clears its images (the reflow can't be tracked for fixed-pixel placement), and an image only partway on-screen is hidden until it fully fits.
+Resizing a window clears its images (the reflow isn't tracked for fixed-pixel placement), and an image only partway on-screen is hidden until it fully fits.
 
 ## Roadmap
 

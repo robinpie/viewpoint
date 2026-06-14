@@ -65,10 +65,17 @@ static int cb_damage(VTermRect rect, void *user)
 {
 	Window *w = user;
 	dmg_add_rows(w, rect.start_row, rect.end_row);
-	/* Rewritten cells discard any sixel covering them (clears, alt-screen
-	 * switches, TUI redraws). Scroll damage comes via moverect, not here. */
-	sixel_damage(w, rect.start_row, rect.end_row, rect.start_col,
-		     rect.end_col);
+	/* A full-screen erase (e.g. `clear`/ED 2J) discards any sixel on the live
+	 * screen: its text is gone, so the pixels must go too. We deliberately do
+	 * NOT evict on smaller damage - the cursor and prompt naturally land on an
+	 * image's edge after a scroll, and treating that incidental rewrite as an
+	 * erase would drop a freshly-placed image before it ever showed. Buffer
+	 * switches (alt-screen TUIs like vim) are handled in cb_settermprop. */
+	if (rect.start_row <= 0 && rect.end_row >= w->rows &&
+	    rect.start_col <= 0 && rect.end_col >= w->cols) {
+		sixel_damage(w, rect.start_row, rect.end_row, rect.start_col,
+			     rect.end_col);
+	}
 	w->dirty = true;
 	return 1;
 }
@@ -106,6 +113,14 @@ static int cb_settermprop(VTermProp prop, VTermValue *val, void *user)
 		/* When the inner app turns on mouse reporting, the wheel belongs to it;
          * otherwise the wheel drives our scrollback (see input.c). */
 		w->app_mouse = val->number != VTERM_PROP_MOUSE_NONE;
+		break;
+	case VTERM_PROP_ALTSCREEN:
+		/* Switching screen buffers (vim and other full-screen TUIs use the
+		 * alternate screen) replaces everything on the live screen. Our images
+		 * are anchored in shared scrollback coordinates and can't tell the two
+		 * buffers apart, so a primary-screen sixel would otherwise bleed through
+		 * the alt screen. Drop them on any switch, either direction. */
+		sixel_images_clear(w);
 		break;
 	/* OSC window titles are intentionally ignored: viewpoint derives the title
      * itself from the PTY's foreground program / shell cwd (window_refresh_title). */
