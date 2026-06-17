@@ -120,10 +120,17 @@ void window_destroy(WM *wm, Window *win)
 		return;
 	}
 	if (win->child > 0) {
-		kill(win->child, SIGHUP);
+		/* forkpty() put the child in its own session as group leader, so its
+         * pgid equals its pid. SIGHUP the whole group, not just the shell:
+         * that reaches jobs the shell started in its group. */
+		killpg(win->child, SIGHUP);
 	}
 	vt_free(win);
 	if (win->pty >= 0) {
+		/* Hang up the slave by closing the master. The kernel then delivers
+         * SIGHUP to the terminal's foreground process group, which covers a
+         * full-screen app (vim, less, …) running in its own group — something
+         * the killpg above, aimed at the shell's group, would miss. */
 		close(win->pty);
 		win->pty = -1;
 	}
