@@ -24,6 +24,7 @@
 #define _GNU_SOURCE
 #include "viewpoint.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -110,8 +111,9 @@ void background_free(WM *wm)
 	bg_drop_planes(wm, true);
 }
 
-/* Track a freshly-blitted background plane and sink it below every window. */
-static bool bg_add_plane(WM *wm, struct ncplane *p)
+/* Track a background plane for later teardown (z-order is handled in one shot by
+ * move_family_bottom on the container, so this doesn't restack). */
+static bool bg_track(WM *wm, struct ncplane *p)
 {
 	if (!p) {
 		return false;
@@ -124,14 +126,29 @@ static bool bg_add_plane(WM *wm, struct ncplane *p)
 	}
 	wm->bg_planes = n;
 	wm->bg_planes[wm->bg_nplanes++] = p;
-	ncplane_move_bottom(p); /* above the std base cell, below all windows */
 	return true;
 }
 
-static struct ncplane *bg_blit(WM *wm, int y, int x, ncscale_e scale)
+/* Expand a leading "~" / "~/" to $HOME (ncvisual_from_file won't). Returns
+ * `path` unchanged, or `buf` holding the expanded form. */
+static const char *expand_tilde(const char *path, char *buf, size_t buflen)
+{
+	if (path[0] == '~' && (path[1] == '/' || path[1] == '\0')) {
+		const char *home = getenv("HOME");
+		if (home && *home) {
+			snprintf(buf, buflen, "%s%s", home, path + 1);
+			return buf;
+		}
+	}
+	return path;
+}
+
+/* Blit the retained visual as a pixel-bitmap child of `parent` at (y,x). */
+static struct ncplane *bg_blit(WM *wm, struct ncplane *parent, int y, int x,
+			       ncscale_e scale)
 {
 	struct ncvisual_options o = { 0 };
-	o.n = wm->std;
+	o.n = parent;
 	o.y = y;
 	o.x = x;
 	o.scaling = scale;
@@ -140,17 +157,91 @@ static struct ncplane *bg_blit(WM *wm, int y, int x, ncscale_e scale)
 	return ncvisual_blit(wm->nc, wm->bg_visual, &o);
 }
 
-/* Center a blitted plane within the desktop (crops if larger). */
-static void bg_center(WM *wm, struct ncplane *p)
+/* Compose the source image tiled across the whole desktop area into one RGBA
+ * buffer and blit it as a *single* pixel-bitmap plane. Tiling with many separate
+ * adjacent bitmap planes cascades/overlaps under kitty backends (e.g. Konsole),
+ * which only reliably composite a single sprixel behind the text planes; one
+ * desktop-sized bitmap behaves exactly like the stretch/scale modes. The buffer
+ * is sized to the area in cells (ah*cdy x aw*cdx px), so it never reaches the
+ * last physical row. Returns the plane (child of `area`), or NULL on failure. */
+static struct ncplane *bg_blit_tiled(WM *wm, struct ncplane *area, int ah, int aw)
+{
+	ncvgeom g;
+	struct ncvisual_options probe = { .blitter = NCBLIT_PIXEL,
+					  .scaling = NCSCALE_NONE };
+	if (ncvisual_geom(wm->nc, wm->bg_visual, &probe, &g) != 0 ||
+	    g.pixy == 0 || g.pixx == 0 || g.cdimy == 0 || g.cdimx == 0) {
+		return NULL;
+	}
+	int sh = (int)g.pixy, sw = (int)g.pixx;
+	int dh = ah * (int)g.cdimy, dw = aw * (int)g.cdimx;
+	if (dh <= 0 || dw <= 0) {
+		return NULL;
+	}
+
+	/* Pull the source out once as packed RGBA bytes. */
+	size_t srow = (size_t)sw * 4;
+	unsigned char *src = malloc((size_t)sh * srow);
+	if (!src) {
+		return NULL;
+	}
+	for (int y = 0; y < sh; y++) {
+		for (int x = 0; x < sw; x++) {
+			uint32_t px = 0;
+			ncvisual_at_yx(wm->bg_visual, (unsigned)y, (unsigned)x,
+				       &px);
+			unsigned char *d = src + (size_t)y * srow + (size_t)x * 4;
+			d[0] = ncpixel_r(px);
+			d[1] = ncpixel_g(px);
+			d[2] = ncpixel_b(px);
+			d[3] = ncpixel_a(px);
+		}
+	}
+
+	/* Tile it into a desktop-sized buffer (repeat each source row across,
+	 * and repeat rows down, both by modulo). */
+	size_t drow = (size_t)dw * 4;
+	unsigned char *dst = malloc((size_t)dh * drow);
+	if (!dst) {
+		free(src);
+		return NULL;
+	}
+	for (int y = 0; y < dh; y++) {
+		unsigned char *s = src + (size_t)(y % sh) * srow;
+		unsigned char *d = dst + (size_t)y * drow;
+		size_t filled = 0;
+		while (filled < drow) {
+			size_t chunk = srow;
+			if (chunk > drow - filled) {
+				chunk = drow - filled;
+			}
+			memcpy(d + filled, s, chunk);
+			filled += chunk;
+		}
+	}
+	free(src);
+
+	struct ncvisual *tiled = ncvisual_from_rgba(dst, dh, (int)drow, dw);
+	free(dst);
+	if (!tiled) {
+		return NULL;
+	}
+	struct ncvisual_options o = { .n = area,
+				      .scaling = NCSCALE_NONE,
+				      .blitter = NCBLIT_PIXEL,
+				      .flags = NCVISUAL_OPTION_CHILDPLANE };
+	struct ncplane *p = ncvisual_blit(wm->nc, tiled, &o);
+	ncvisual_destroy(tiled);
+	return p;
+}
+
+/* Center plane `p` within a bound_h x bound_w box (its parent's area). */
+static void bg_center(struct ncplane *p, int bound_h, int bound_w)
 {
 	unsigned ph, pw;
 	ncplane_dim_yx(p, &ph, &pw);
-	int cy = ((int)wm->scr_rows - (int)ph) / 2;
-	int cx = ((int)wm->scr_cols - (int)pw) / 2;
-	ncplane_move_yx(p, cy, cx);
+	ncplane_move_yx(p, (bound_h - (int)ph) / 2, (bound_w - (int)pw) / 2);
 }
-
-#define BG_TILE_MAX 256 /* cap pixel-bitmap planes for a tiled background */
 
 void background_apply(WM *wm)
 {
@@ -169,11 +260,16 @@ void background_apply(WM *wm)
 			mode = BG_SOLID;
 		} else {
 			if (!wm->bg_visual) {
-				wm->bg_visual = ncvisual_from_file(path);
+				char pbuf[1024];
+				const char *load =
+					expand_tilde(path, pbuf, sizeof(pbuf));
+				wm->bg_visual = ncvisual_from_file(load);
+				if (!wm->bg_visual) {
+					vp_log("background: cannot load image %s\n",
+					       load);
+				}
 			}
 			if (!wm->bg_visual) {
-				vp_log("background: cannot load image %s\n",
-				       path);
 				mode = BG_SOLID;
 			}
 		}
@@ -207,51 +303,82 @@ void background_apply(WM *wm)
 			}
 		}
 	} else if (mode == BG_IMAGE) {
-		switch (wm->theme.bg_fit) {
-		case FIT_STRETCH:
-			bg_add_plane(wm, bg_blit(wm, 0, 0, NCSCALE_STRETCH));
-			break;
-		case FIT_SCALE: {
-			struct ncplane *p = bg_blit(wm, 0, 0, NCSCALE_SCALE);
-			if (p) {
-				bg_center(wm, p);
-				bg_add_plane(wm, p);
-			}
-			break;
+		/* Confine the image to the desktop area above the taskbar: pixel
+		 * bitmaps that reach the last physical row (or hang off an edge) make
+		 * some terminals scroll the whole display. The image planes are
+		 * children of `area`, so STRETCH/SCALE size to it (never the last row),
+		 * and CENTER/TILE only place tiles that fit fully inside it. */
+		int aw = (int)wm->scr_cols;
+		int ah = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
+		if (ah < 1) {
+			ah = (int)wm->scr_rows;
 		}
-		case FIT_CENTER: {
-			struct ncplane *p = bg_blit(wm, 0, 0, NCSCALE_NONE);
-			if (p) {
-				bg_center(wm, p);
-				bg_add_plane(wm, p);
+		ncplane_options ao = { 0 };
+		ao.rows = (unsigned)ah;
+		ao.cols = (unsigned)aw;
+		struct ncplane *area = ncplane_create(wm->std, &ao);
+		if (area) {
+			uint64_t tb = 0;
+			ncchannels_set_fg_alpha(&tb, NCALPHA_TRANSPARENT);
+			ncchannels_set_bg_alpha(&tb, NCALPHA_TRANSPARENT);
+			ncplane_set_base(area, "", 0, tb);
+			bg_track(wm, area);
+
+			switch (wm->theme.bg_fit) {
+			case FIT_STRETCH:
+				bg_track(wm, bg_blit(wm, area, 0, 0,
+						     NCSCALE_STRETCH));
+				break;
+			case FIT_SCALE: {
+				struct ncplane *p =
+					bg_blit(wm, area, 0, 0, NCSCALE_SCALE);
+				if (p) {
+					bg_center(p, ah, aw);
+					bg_track(wm, p);
+				}
+				break;
 			}
-			break;
-		}
-		case FIT_TILE: {
-			struct ncplane *first = bg_blit(wm, 0, 0, NCSCALE_NONE);
-			if (first) {
-				unsigned th, tw;
-				ncplane_dim_yx(first, &th, &tw);
-				bg_add_plane(wm, first);
-				for (int y = 0;
-				     th > 0 && y < (int)wm->scr_rows &&
-				     wm->bg_nplanes < BG_TILE_MAX;
-				     y += (int)th) {
-					for (int x = 0;
-					     tw > 0 && x < (int)wm->scr_cols &&
-					     wm->bg_nplanes < BG_TILE_MAX;
-					     x += (int)tw) {
-						if (y == 0 && x == 0) {
-							continue;
-						}
-						bg_add_plane(wm,
-							     bg_blit(wm, y, x,
-								     NCSCALE_NONE));
+			case FIT_CENTER: {
+				struct ncplane *p =
+					bg_blit(wm, area, 0, 0, NCSCALE_NONE);
+				if (p) {
+					unsigned ph, pw;
+					ncplane_dim_yx(p, &ph, &pw);
+					if ((int)ph > ah || (int)pw > aw) {
+						/* Too big to center without spilling onto the
+						 * taskbar row: fit it instead. */
+						ncplane_destroy(p);
+						p = bg_blit(wm, area, 0, 0,
+							    NCSCALE_SCALE);
+					}
+					if (p) {
+						bg_center(p, ah, aw);
+						bg_track(wm, p);
 					}
 				}
+				break;
 			}
-			break;
-		}
+			case FIT_TILE: {
+				/* One desktop-sized bitmap of the tiled image,
+				 * edge to edge (Windows-style). */
+				struct ncplane *p =
+					bg_blit_tiled(wm, area, ah, aw);
+				if (!p) {
+					/* Couldn't compose: stretch one copy. */
+					p = bg_blit(wm, area, 0, 0,
+						    NCSCALE_STRETCH);
+				}
+				bg_track(wm, p);
+				break;
+			}
+			}
+			/* Sink the image family to the bottom, then drop std
+			 * beneath it: move_family_bottom alone would place the
+			 * image *below* std, whose opaque base cell would then
+			 * paint over the whole image. Final order (bottom→top):
+			 * std base, image, windows, taskbar, panel. */
+			ncplane_move_family_bottom(area);
+			ncplane_move_bottom(wm->std);
 		}
 	}
 
