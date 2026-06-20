@@ -52,7 +52,6 @@ static void compute_layout(WM *wm)
 	g_arrow_l_x0 = g_arrow_r_x0 = -1;
 	g_maxscroll = 0;
 
-	/* How many slots fit if we don't reserve room for the scroll arrows. */
 	int maxfit = g_mode_x0 / SLOT_W;
 	if (maxfit < 0) {
 		maxfit = 0;
@@ -141,8 +140,6 @@ void taskbar_draw(WM *wm)
 	}
 	compute_layout(wm);
 
-	/* Background fill: erase paints the whole row with the base cell (the bar's
-     * background, set in taskbar_create). */
 	ncplane_set_styles(t, NCSTYLE_NONE);
 	ncplane_erase(t);
 
@@ -193,7 +190,6 @@ void taskbar_draw(WM *wm)
 		ncplane_putstr_yx(t, 0, g_arrow_r_x0, " ► ");
 	}
 
-	/* Mode indicator + clickable toggle at the far right. */
 	if (g_mode_x0 >= 0) {
 		vp_setfg(t, wm->theme.bar_mode_fg);
 		if (wm->mode == MODE_PASSTHROUGH) {
@@ -215,7 +211,6 @@ bool taskbar_click(WM *wm, int y, int x)
 	}
 	compute_layout(wm);
 
-	/* Mode toggle region. */
 	if (x >= g_mode_x0) {
 		wm->mode = (wm->mode == MODE_INTERPRET) ? MODE_PASSTHROUGH :
 							  MODE_INTERPRET;
@@ -227,7 +222,6 @@ bool taskbar_click(WM *wm, int y, int x)
 		return true;
 	}
 
-	/* ◄ / ► scroll arrows. */
 	if (g_arrow_l_x0 >= 0 && x >= g_arrow_l_x0 &&
 	    x < g_arrow_l_x0 + ARROW_W) {
 		taskbar_scroll_by(wm, -1);

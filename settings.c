@@ -38,14 +38,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Desktop launcher: a roomy icon "tile" (a big gear above a label), top-left.
- * It lives on the desktop, below the windows, so windows can cover it. */
 #define ICON_Y 1
 #define ICON_X 1
 #define ICON_W 12
 #define ICON_H 4
 
-/* Keybinding-view panel sizing. Clamped to the screen at open/draw time. */
 #define PANEL_W 56
 #define PANEL_CHROME 4 /* top border + status + hint + bottom border */
 
@@ -63,7 +60,6 @@
 #define GRID_ORIGIN_Y 2 /* first tile row (row 0 border, row 1 gap) */
 #define GRID_ORIGIN_X 2 /* first tile col (col 0 border, col 1 margin) */
 
-/* A populated Control-Panel tile: a glyph, a caption, and the sub-view it opens. */
 typedef struct {
 	const char *glyph;
 	const char *label;
@@ -105,16 +101,11 @@ static const term_row g_term_rows[] = {
 };
 #define TERM_ROWS ((int)(sizeof(g_term_rows) / sizeof(g_term_rows[0])))
 
-/* The VpConfig int field backing row `i`. */
 static int *term_field(WM *wm, int i)
 {
 	return (int *)((char *)&wm->config + g_term_rows[i].field_off);
 }
 
-/* ----- small helpers ----------------------------------------------------- */
-
-/* Clamp a desktop icon's top-left (y,x) so the whole h×w tile stays on-screen
- * and above the taskbar row. */
 static void clamp_icon_pos(const WM *wm, int h, int w, int *y, int *x)
 {
 	int maxy = (int)wm->scr_rows - (wm->taskbar ? 1 : 0) - h;
@@ -140,7 +131,6 @@ static bool is_toggle_row(int r)
 	return r == keymap_action_count();
 }
 
-/* Full Control-Panel grid dimensions (interior tiles only, no panel chrome). */
 static int grid_inner_w(void)
 {
 	return GRID_COLS * TILE_W + (GRID_COLS - 1) * TILE_GAP;
@@ -150,7 +140,6 @@ static int grid_inner_h(void)
 	return GRID_ROWS * TILE_H + (GRID_ROWS - 1) * TILE_GAP;
 }
 
-/* Top-left of grid cell `i` (row-major) within the panel. */
 static void tile_rect(int i, int *ty, int *tx)
 {
 	int row = i / GRID_COLS;
@@ -159,7 +148,6 @@ static void tile_rect(int i, int *ty, int *tx)
 	*tx = GRID_ORIGIN_X + col * (TILE_W + TILE_GAP);
 }
 
-/* Desired centered panel geometry for the current screen size and view. */
 static void panel_geom(const WM *wm, int *y, int *x, int *h, int *w)
 {
 	int W, H;
@@ -195,7 +183,6 @@ static void panel_geom(const WM *wm, int *y, int *x, int *h, int *w)
 	*w = W;
 }
 
-/* Number of list rows the panel's viewport can show. */
 static int viewport_rows(const WM *wm)
 {
 	int H = wm->settings.panel ? (int)ncplane_dim_y(wm->settings.panel) : 0;
@@ -218,7 +205,6 @@ static int app_total_rows(void)
 }
 
 
-/* Clamp selection + scroll for a scrolling list of `n` rows. */
 static void clamp_scroll_n(WM *wm, int n)
 {
 	Settings *s = &wm->settings;
@@ -262,8 +248,6 @@ static void clamp_scroll(WM *wm)
 		s->scroll = 0;
 }
 
-/* ----- the desktop launcher icon ----------------------------------------- */
-
 /* Resting top-left of the Settings tile: a user-dragged position from the
  * config if there is one, otherwise the built-in top-left corner. Always
  * clamped onto the current screen. */
@@ -303,7 +287,6 @@ void settings_icon_redraw(WM *wm)
 		return;
 	}
 
-	/* Tile background. */
 	uint64_t base = 0;
 	vp_rgb fg = wm->theme.icon_fg, bg = wm->theme.icon_bg;
 	ncchannels_set_fg_rgb8(&base, (fg >> 16) & 0xff, (fg >> 8) & 0xff,
@@ -314,7 +297,6 @@ void settings_icon_redraw(WM *wm)
 	vp_setbg(p, wm->theme.icon_bg);
 	ncplane_erase(p);
 
-	/* Rounded tile border. */
 	vp_setfg(p, wm->theme.icon_border);
 	ncplane_putegc_yx(p, 0, 0, "╭", NULL);
 	ncplane_putegc_yx(p, 0, ICON_W - 1, "╮", NULL);
@@ -329,11 +311,9 @@ void settings_icon_redraw(WM *wm)
 		ncplane_putegc_yx(p, r, ICON_W - 1, "│", NULL);
 	}
 
-	/* Big gear, centered on its own row. */
 	vp_setfg(p, wm->theme.icon_glyph);
 	ncplane_putegc_yx(p, 1, ICON_W / 2 - 1, "⚙", NULL);
 
-	/* Label beneath it. */
 	vp_setfg(p, wm->theme.icon_fg);
 	ncplane_putstr_yx(p, 2, 2, "Settings");
 }
@@ -361,11 +341,9 @@ bool settings_icon_hit(WM *wm, int y, int x)
 	return y >= ay && y < ay + (int)r && x >= ax && x < ax + (int)c;
 }
 
-/* ----- the desktop "Exit" launcher icon ---------------------------------- */
 /* A sibling of the Settings tile, anchored to the bottom-right corner just
  * above the taskbar. viewpoint no longer quits when the last window closes, so
  * this is the explicit way out. */
-
 #define EXIT_W 12
 #define EXIT_H 4
 
@@ -378,10 +356,8 @@ static void exit_icon_geom(const WM *wm, int *y, int *x)
 		*y = wm->config.exit_icon_y;
 		*x = wm->config.exit_icon_x;
 	} else {
-		int bottom = (int)wm->scr_rows -
-			     (wm->taskbar ? 1 : 0); /* first row below us */
-		*y = bottom - EXIT_H -
-		     1; /* leave a blank row between the icon and taskbar */
+		int bottom = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
+		*y = bottom - EXIT_H - 1; /* leave a blank row between the icon and taskbar */
 		*x = (int)wm->scr_cols - EXIT_W - 1;
 	}
 	clamp_icon_pos(wm, EXIT_H, EXIT_W, y, x);
@@ -411,7 +387,6 @@ void exit_icon_redraw(WM *wm)
 		return;
 	}
 
-	/* Tile background (a warm red-grey to read as "quit"). */
 	uint64_t base = 0;
 	vp_rgb fg = wm->theme.exit_fg, bg = wm->theme.exit_bg;
 	ncchannels_set_fg_rgb8(&base, (fg >> 16) & 0xff, (fg >> 8) & 0xff,
@@ -422,7 +397,6 @@ void exit_icon_redraw(WM *wm)
 	vp_setbg(p, wm->theme.exit_bg);
 	ncplane_erase(p);
 
-	/* Rounded tile border. */
 	vp_setfg(p, wm->theme.exit_border);
 	ncplane_putegc_yx(p, 0, 0, "╭", NULL);
 	ncplane_putegc_yx(p, 0, EXIT_W - 1, "╮", NULL);
@@ -437,11 +411,9 @@ void exit_icon_redraw(WM *wm)
 		ncplane_putegc_yx(p, r, EXIT_W - 1, "│", NULL);
 	}
 
-	/* Big power symbol, centered on its own row. */
 	vp_setfg(p, wm->theme.exit_glyph);
 	ncplane_putegc_yx(p, 1, EXIT_W / 2 - 1, "⏻", NULL);
 
-	/* Label beneath it, centered in the tile. */
 	vp_setfg(p, wm->theme.exit_fg);
 	static const char label[] = "Exit";
 	ncplane_putstr_yx(p, 2, (EXIT_W - (int)(sizeof(label) - 1)) / 2, label);
@@ -477,8 +449,6 @@ void exit_icon_teardown(WM *wm)
 		wm->exit_icon = NULL;
 	}
 }
-
-/* ----- open / close ------------------------------------------------------ */
 
 void settings_open(WM *wm)
 {
@@ -573,7 +543,7 @@ void settings_close(WM *wm)
 		ncplane_destroy(s->panel);
 		s->panel = NULL;
 	}
-	wm->needs_render = true; /* recomposite the desktop without the panel */
+	wm->needs_render = true;
 	config_save(&wm->config);
 	vp_log("settings: close (saved)\n");
 }
@@ -590,8 +560,6 @@ void settings_teardown(WM *wm)
 		s->icon = NULL;
 	}
 }
-
-/* ----- editing actions --------------------------------------------------- */
 
 static void apply_capture(WM *wm, uint32_t id, unsigned mods)
 {
@@ -700,9 +668,6 @@ static void term_adjust(WM *wm, int row, int dir)
 	s->dirty = true;
 }
 
-/* ----- input ------------------------------------------------------------- */
-
-/* Move the grid selection by (drow, dcol), clamped to the populated tiles. */
 static void grid_move(WM *wm, int drow, int dcol)
 {
 	Settings *s = &wm->settings;
@@ -796,8 +761,6 @@ static void settings_terminal_key(WM *wm, const ncinput *ni)
 		break;
 	}
 }
-
-/* ----- the Appearance view ----------------------------------------------- */
 
 static const char *bg_mode_name(vp_bg_mode m)
 {
@@ -1236,7 +1199,6 @@ void settings_click(WM *wm, int btn, int y, int x)
 	int rely = y - ay;
 	int relx = x - ax;
 
-	/* Grid view: open whichever populated tile was clicked. */
 	if (s->view == SETTINGS_VIEW_GRID) {
 		for (int i = 0; i < GRID_ENTRY_COUNT; i++) {
 			int ty, tx;
@@ -1251,7 +1213,6 @@ void settings_click(WM *wm, int btn, int y, int x)
 		return;
 	}
 
-	/* Terminal view: clicking a row selects it (adjust with ←/→ or the wheel). */
 	if (s->view == SETTINGS_VIEW_TERMINAL) {
 		int listrow = rely - 1; /* row 0 is the top border */
 		if (listrow >= 0 && listrow < TERM_ROWS) {
@@ -1261,7 +1222,6 @@ void settings_click(WM *wm, int btn, int y, int x)
 		return;
 	}
 
-	/* Appearance view: clicking a row selects it (change with ←/→, Enter to edit). */
 	if (s->view == SETTINGS_VIEW_APPEARANCE) {
 		if (s->editing) {
 			return; /* ignore clicks while typing */
@@ -1277,7 +1237,6 @@ void settings_click(WM *wm, int btn, int y, int x)
 		return;
 	}
 
-	/* Click on a list row: select it and start capturing immediately. */
 	int listrow = rely - 1; /* row 0 is the top border */
 	if (listrow >= 0 && listrow < viewport_rows(wm)) {
 		int row = s->scroll + listrow;
@@ -1319,8 +1278,6 @@ void settings_scroll(WM *wm, int dir)
 	s->dirty = true;
 }
 
-/* ----- drawing ----------------------------------------------------------- */
-
 static void draw_border(WM *wm, struct ncplane *p, int W, int H,
 			const char *title)
 {
@@ -1341,7 +1298,6 @@ static void draw_border(WM *wm, struct ncplane *p, int W, int H,
 	ncplane_putstr_yx(p, 0, 2, title);
 }
 
-/* Draw the bottom status line shared by both views. */
 static void draw_status(WM *wm, struct ncplane *p, int W, int H,
 			const char *status)
 {

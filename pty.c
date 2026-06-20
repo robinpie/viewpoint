@@ -61,7 +61,6 @@ pid_t pty_spawn(int rows, int cols, int *master_out)
 			shell = "/bin/sh";
 		}
 		execlp(shell, shell, (char *)NULL);
-		/* exec failed */
 		_exit(127);
 	}
 

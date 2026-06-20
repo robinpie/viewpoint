@@ -66,7 +66,6 @@ static void reap_children(void)
 	}
 }
 
-/* Drain all currently-available host input events. */
 static void handle_input(WM *wm, bool *quit)
 {
 	ncinput ni;
@@ -87,7 +86,6 @@ static void handle_input(WM *wm, bool *quit)
 		if (ni.evtype == NCTYPE_RELEASE) {
 			continue; /* forward presses/repeats only */
 		}
-		/* WM chords first; anything not consumed goes to the focused window. */
 		if (input_handle_key(wm, &ni)) {
 			continue;
 		}
@@ -98,7 +96,6 @@ static void handle_input(WM *wm, bool *quit)
 	}
 }
 
-/* Read available output from one window's PTY into its emulator. */
 static void drain_window_pty(Window *win)
 {
 	char buf[8192];
@@ -114,7 +111,7 @@ static void drain_window_pty(Window *win)
 				continue;
 			}
 			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				return; /* drained */
+				return;
 			}
 			/* Linux PTY master returns -1/EIO once the slave is gone. */
 			win->dead = true;
@@ -181,7 +178,6 @@ int main(void)
 	exit_icon_init(
 		&wm); /* desktop Exit icon (bottom-right), below the windows */
 
-	/* Start with two overlapping shells. */
 	wm_spawn_window(&wm);
 	wm_spawn_window(&wm);
 	if (wm.nwins == 0) {
@@ -306,7 +302,6 @@ int main(void)
 		}
 	}
 
-	/* Teardown. */
 	for (int i = 0; i < wm.nwins; i++) {
 		window_destroy(&wm, wm.wins[i]);
 	}

@@ -29,11 +29,6 @@
 #include <unistd.h>
 #include <errno.h>
 
-/* ------------------------------------------------------------------------- */
-/* Damage accumulation                                                       */
-/* ------------------------------------------------------------------------- */
-
-/* Mark the live-screen rows [r0, r1) as needing a repaint at the next sweep. */
 static void dmg_add_rows(Window *w, int r0, int r1)
 {
 	if (w->dmg_all) {
@@ -51,15 +46,10 @@ static void dmg_add_rows(Window *w, int r0, int r1)
 	}
 }
 
-/* Force a full-window repaint at the next sweep. */
 static void dmg_full(Window *w)
 {
 	w->dmg_all = true;
 }
-
-/* ------------------------------------------------------------------------- */
-/* libvterm callbacks                                                        */
-/* ------------------------------------------------------------------------- */
 
 static int cb_damage(VTermRect rect, void *user)
 {
@@ -133,7 +123,6 @@ static int cb_settermprop(VTermProp prop, VTermValue *val, void *user)
 static int cb_bell(void *user)
 {
 	(void)user;
-	/* Could flash the frame; ignored for now. */
 	return 1;
 }
 
@@ -157,7 +146,6 @@ static sb_line *sb_get(Window *w, int i)
 	return &w->sb[(w->sb_head + i) % w->sb_cap];
 }
 
-/* libvterm hands us a line that just scrolled off the top; retain a copy. */
 static int cb_sb_pushline(int cols, const VTermScreenCell *cells, void *user)
 {
 	Window *w = user;
@@ -227,7 +215,7 @@ static int cb_sb_popline(int cols, VTermScreenCell *cells, void *user)
 	free(ln->cells);
 	ln->cells = NULL;
 	w->sb_count--;
-	w->scroll_base--; /* a retained line returned to the live screen */
+	w->scroll_base--;
 	if (w->sb_offset > w->sb_count) {
 		w->sb_offset = w->sb_count;
 	}
@@ -236,7 +224,6 @@ static int cb_sb_popline(int cols, VTermScreenCell *cells, void *user)
 	return 1;
 }
 
-/* The inner app cleared the scrollback (e.g. CSI 3 J). Drop our copy too. */
 static int cb_sb_clear(void *user)
 {
 	Window *w = user;
@@ -374,7 +361,6 @@ void vt_reply(Window *w, const char *bytes, size_t len)
 	}
 }
 
-/* Output callback: bytes the emulator wants to send back to the child. */
 static void cb_output(const char *s, size_t len, void *user)
 {
 	Window *w = user;
@@ -406,10 +392,6 @@ static void cb_output(const char *s, size_t len, void *user)
 	}
 	vt_reply(w, s + start, len - start);
 }
-
-/* ------------------------------------------------------------------------- */
-/* Lifecycle                                                                 */
-/* ------------------------------------------------------------------------- */
 
 void vt_init(Window *w)
 {
@@ -507,8 +489,6 @@ void vt_set_scrollback_max(Window *w, int max)
 		return;
 	}
 
-	/* Repack into a fresh array of the new size, keeping the newest min(count,
-     * max) lines and freeing the oldest ones that no longer fit. */
 	sb_line *na = calloc((size_t)max, sizeof(*na));
 	if (!na) {
 		return; /* keep the existing ring on allocation failure */
@@ -550,10 +530,6 @@ void vt_free(Window *w)
 		w->sb_cap = w->sb_count = w->sb_head = w->sb_offset = 0;
 	}
 }
-
-/* ------------------------------------------------------------------------- */
-/* Keyboard / mouse forwarding                                               */
-/* ------------------------------------------------------------------------- */
 
 void vt_key_unichar(Window *w, uint32_t c, VTermModifier mod)
 {
@@ -605,7 +581,6 @@ void vt_send_key(Window *w, const ncinput *ni)
 	VTermModifier mod = vterm_mods(ni);
 	uint32_t id = ni->id;
 
-	/* Map the synthesized/control keys libvterm has dedicated encodings for. */
 	switch (id) {
 	case NCKEY_ENTER:
 		vt_key_special(w, VTERM_KEY_ENTER, mod);
@@ -653,14 +628,12 @@ void vt_send_key(Window *w, const ncinput *ni)
 		break;
 	}
 
-	/* Function keys F1..F60 map to VTERM_KEY_FUNCTION(n). */
 	if (id >= NCKEY_F01 && id <= NCKEY_F60) {
 		int n = (int)(id - NCKEY_F01) + 1;
 		vt_key_special(w, VTERM_KEY_FUNCTION(n), mod);
 		return;
 	}
 
-	/* Ignore the modifier-only and other synthesized events we don't forward. */
 	if (nckey_synthesized_p(id)) {
 		return;
 	}
@@ -684,11 +657,6 @@ void vt_send_key(Window *w, const ncinput *ni)
 	}
 }
 
-/* ------------------------------------------------------------------------- */
-/* Rendering: sweep the grid into the content plane                          */
-/* ------------------------------------------------------------------------- */
-
-/* Append a unicode codepoint to a UTF-8 buffer; returns bytes written. */
 static size_t utf8_encode(uint32_t cp, char *out)
 {
 	if (cp < 0x80) {
@@ -821,7 +789,6 @@ static void paint_cell(struct ncplane *n, const VTermScreen *vts, cellcache *cc,
 	apply_styles(n, cc, styles);
 	cc->init = true;
 
-	/* Build the EGC: base glyph plus any combining chars. */
 	char egc[VTERM_MAX_CHARS_PER_CELL * 4 + 1];
 	size_t off = 0;
 	if (cell->chars[0] == 0) {
@@ -906,7 +873,6 @@ void vt_render(Window *w)
 			}
 		}
 	}
-	/* Reposition any sixel images for the current scroll/scrollback state. */
 	sixel_reposition(w);
 
 	w->dirty = false;

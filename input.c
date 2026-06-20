@@ -29,7 +29,6 @@
 #include <ctype.h>
 #include <time.h>
 
-/* Step sizes for keyboard move/resize chords. */
 #define MOVE_STEP 2
 #define RESIZE_STEP 1
 
@@ -89,8 +88,6 @@ static const keychord g_default_keymap[] = {
 #undef A
 #undef AS
 #undef S
-
-/* ----- config keymap parsing & construction ----------------------------- */
 
 /* Action names accepted in `bind` lines, paired with a human label (shown in
  * the in-app settings editor) and the enum. Row order here is the order the
@@ -195,7 +192,6 @@ static bool key_from_name(const char *name, uint32_t *id)
 		*id = isalpha(c) ? (uint32_t)tolower(c) : (uint32_t)c;
 		return true;
 	}
-	/* function keys f1..f60 */
 	if ((name[0] == 'f' || name[0] == 'F') &&
 	    isdigit((unsigned char)name[1])) {
 		char *end = NULL;
@@ -256,7 +252,6 @@ static bool parse_chord(const char *str, uint32_t *id_out, unsigned *mods_out)
 	return true;
 }
 
-/* Add or override (id,mods)→act in cfg->keymap, growing the array as needed. */
 static void keymap_put(VpConfig *cfg, uint32_t id, unsigned mods, vp_action act)
 {
 	for (int i = 0; i < cfg->nkeys; i++) {
@@ -349,8 +344,6 @@ bool keymap_set_toggle(VpConfig *cfg, const char *chord)
 	return true;
 }
 
-/* ----- queries used by the in-app settings editor & the config writer ---- */
-
 int keymap_action_count(void)
 {
 	return ACTION_COUNT;
@@ -378,7 +371,6 @@ const char *keymap_action_name(vp_action act)
 	return "?";
 }
 
-/* Render (id,mods) back into a "alt+shift+left"-style string. */
 void keymap_format_chord(uint32_t id, unsigned mods, char *buf, size_t n)
 {
 	if (n == 0) {
@@ -403,7 +395,6 @@ void keymap_format_chord(uint32_t id, unsigned mods, char *buf, size_t n)
 	if (mods & NCKEY_MOD_SHIFT)
 		APPEND("shift+");
 
-	/* function keys */
 	if (id >= NCKEY_F01 && id <= NCKEY_F60) {
 		char fb[8];
 		snprintf(fb, sizeof(fb), "f%u", (unsigned)(id - NCKEY_F01 + 1));
@@ -448,7 +439,7 @@ bool keymap_chord_for_action(const VpConfig *cfg, vp_action act, char *buf,
 }
 
 /* Translate a live keypress into a chord, rejecting bare modifier/lock keys and
- * mouse events. Used by the settings editor when capturing a new binding. */
+ * mouse events. */
 bool keymap_chord_from_input(const ncinput *ni, uint32_t *id_out,
 			     unsigned *mods_out)
 {
@@ -502,7 +493,6 @@ void keymap_rebind_action(VpConfig *cfg, vp_action act, uint32_t id,
 	keymap_put(cfg, id, mods, act);
 }
 
-/* Remove every chord bound to `act` (leaving it unbound). */
 void keymap_unbind_action(VpConfig *cfg, vp_action act)
 {
 	for (int i = 0; i < cfg->nkeys;) {
@@ -536,7 +526,6 @@ static unsigned eff_mods(const ncinput *ni)
 	return mods & (NCKEY_MOD_ALT | NCKEY_MOD_SHIFT | NCKEY_MOD_CTRL);
 }
 
-/* Focus, or restore if minimized, the window in taskbar slot N (0-based). */
 static void focus_slot(WM *wm, int slot)
 {
 	if (slot < 0 || slot >= wm->nwins) {
@@ -597,7 +586,6 @@ static void do_action(WM *wm, vp_action act)
 		break;
 	case ACT_SCROLL_UP:
 	case ACT_SCROLL_DOWN: {
-		/* Keyboard scrolls a near-page at a time. */
 		Window *win = wm_focused(wm);
 		if (win) {
 			int page = win->rows > 1 ? win->rows - 1 : 1;
@@ -627,19 +615,16 @@ static void do_action(WM *wm, vp_action act)
 
 bool input_handle_key(WM *wm, const ncinput *ni)
 {
-	/* The settings editor is modal: while open it swallows every key. */
 	if (wm->settings.open) {
 		settings_handle_key(wm, ni);
 		return true;
 	}
 
-	/* The always-on toggle works in BOTH modes and is never forwarded. */
 	if (ni->id == wm->config.toggle_key) {
 		toggle_mode(wm);
 		return true;
 	}
 
-	/* In PASSTHROUGH, nothing else is interpreted - everything goes to the app. */
 	if (wm->mode != MODE_INTERPRET) {
 		return false;
 	}
@@ -664,7 +649,6 @@ bool input_handle_key(WM *wm, const ncinput *ni)
 		}
 	}
 
-	/* Any non-chord key in INTERPRET mode still goes to the focused window. */
 	return false;
 }
 
@@ -678,11 +662,9 @@ static Window *find_by_id(WM *wm, int id)
 	return NULL;
 }
 
-/* ------------------------------------------------------------------------- */
 /* Source-agnostic mouse model. notcurses funnels every backend (terminal mouse
  * protocols and GPM on the console alike) into ncinput, which input_route_mouse
  * turns into mouse_event() - so the WM mouse logic lives in exactly one place. */
-/* ------------------------------------------------------------------------- */
 
 typedef enum {
 	MEV_PRESS,
@@ -738,8 +720,6 @@ static int border_edge(const Window *win, int rely, int relx)
 		edge |= RZ_BOTTOM;
 	return edge;
 }
-
-/* ----- snap preview ----- */
 
 static void snap_geom(WM *wm, vp_snapzone z, int *gx, int *gy, int *gw, int *gh)
 {
@@ -879,8 +859,6 @@ static void snap_show(WM *wm, vp_snapzone z)
 	wm->needs_render = true; /* outline shown/moved; recomposite */
 }
 
-/* ----- content-area forwarding to the inner app ----- */
-
 static void content_forward(Window *win, mev_type t, int btn, int y, int x,
 			    unsigned mods)
 {
@@ -927,8 +905,6 @@ static uint64_t now_ns(void)
 	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-/* ----- drag updates ----- */
-
 static void update_drag(WM *wm, int y, int x)
 {
 	/* Desktop-icon drag: just slide the tile under the pointer, clamped on the
@@ -954,7 +930,7 @@ static void update_drag(WM *wm, int y, int x)
 		if (nx < 0)
 			nx = 0;
 		ncplane_move_yx(icon, ny, nx);
-		wm->needs_render = true; /* icon plane moved; recomposite */
+		wm->needs_render = true;
 		return;
 	}
 
@@ -992,8 +968,6 @@ static void update_drag(WM *wm, int y, int x)
 		if (nx > (int)wm->scr_cols - 2)
 			nx = (int)wm->scr_cols - 2;
 		window_set_geometry(win, nx, ny, win->w, win->h);
-		/* Arm/disarm the edge snap based on the pointer, and keep the dragged
-         * window above the outline so it stays visible. */
 		snap_show(wm, snap_zone_at(wm, y, x));
 		ncplane_move_family_top(win->frame);
 		if (wm->taskbar) {
@@ -1153,7 +1127,6 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
 		return;
 	}
 
-	/* Interior: forward to the app and lock subsequent motion/release to it. */
 	wm->drag = DRAG_CONTENT;
 	wm->drag_win = win->id;
 	content_forward(win, MEV_PRESS, btn, y, x, mods);
@@ -1244,17 +1217,14 @@ static void mouse_motion(WM *wm, int y, int x, unsigned mods)
 		update_drag(wm, y, x);
 		return;
 	}
-	/* Bare hover: forward to the hovered app (only matters in MOUSE_MOVE mode). */
 	content_forward(wm_window_at(wm, y, x), MEV_MOTION, 1, y, x, mods);
 }
 
 static void mouse_event(WM *wm, mev_type t, int btn, int y, int x,
 			unsigned mods)
 {
-	wm_set_mouse_pos(wm, y,
-			 x); /* software pointer follows every mouse event */
+	wm_set_mouse_pos(wm, y, x);
 
-	/* Modal settings editor takes the mouse while open. */
 	if (wm->settings.open) {
 		if (t == MEV_PRESS) {
 			settings_click(wm, btn, y, x);
@@ -1302,8 +1272,6 @@ static void mouse_event(WM *wm, mev_type t, int btn, int y, int x,
 		break;
 	}
 }
-
-/* ----- notcurses mouse source ----- */
 
 void input_route_mouse(WM *wm, const ncinput *ni)
 {

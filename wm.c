@@ -36,7 +36,7 @@ void wm_init(WM *wm, struct notcurses *nc)
 	wm->focused = -1;
 	wm->next_id = 1;
 	wm->mode = MODE_INTERPRET;
-	wm->needs_render = true; /* force the first frame */
+	wm->needs_render = true;
 	wm->ptr_y = wm->ptr_x = -1; /* no software pointer placed yet */
 	/* Whether this terminal can render pixel bitmaps (sixel/kitty). Gates the
      * whole sixel path; notcurses auto-detects the protocol, no init flag needed. */
@@ -85,8 +85,6 @@ void wm_set_mouse_pos(WM *wm, int y, int x)
 	wm->mouse_y = y;
 	wm->mouse_x = x;
 }
-
-/* ----- theming + desktop background -------------------------------------- */
 
 /* Drop the background image plane(s). Keeps the retained visual unless `visual`
  * is set (full teardown / forcing a re-decode). */
@@ -143,7 +141,6 @@ static const char *expand_tilde(const char *path, char *buf, size_t buflen)
 	return path;
 }
 
-/* Blit the retained visual as a pixel-bitmap child of `parent` at (y,x). */
 static struct ncplane *bg_blit(WM *wm, struct ncplane *parent, int y, int x,
 			       ncscale_e scale)
 {
@@ -179,7 +176,6 @@ static struct ncplane *bg_blit_tiled(WM *wm, struct ncplane *area, int ah, int a
 		return NULL;
 	}
 
-	/* Pull the source out once as packed RGBA bytes. */
 	size_t srow = (size_t)sw * 4;
 	unsigned char *src = malloc((size_t)sh * srow);
 	if (!src) {
@@ -198,8 +194,6 @@ static struct ncplane *bg_blit_tiled(WM *wm, struct ncplane *area, int ah, int a
 		}
 	}
 
-	/* Tile it into a desktop-sized buffer (repeat each source row across,
-	 * and repeat rows down, both by modulo). */
 	size_t drow = (size_t)dw * 4;
 	unsigned char *dst = malloc((size_t)dh * drow);
 	if (!dst) {
@@ -235,7 +229,6 @@ static struct ncplane *bg_blit_tiled(WM *wm, struct ncplane *area, int ah, int a
 	return p;
 }
 
-/* Center plane `p` within a bound_h x bound_w box (its parent's area). */
 static void bg_center(struct ncplane *p, int bound_h, int bound_w)
 {
 	unsigned ph, pw;
@@ -387,7 +380,6 @@ void background_apply(WM *wm)
 
 void theme_apply(WM *wm)
 {
-	/* Resolve preset, then lay config overrides on top. */
 	const VpTheme *preset = vp_theme_builtin(wm->config.theme_name);
 	wm->theme = preset ? *preset : *vp_theme_default();
 
@@ -406,7 +398,6 @@ void theme_apply(WM *wm)
 				   wm->config.color_overrides[i].color);
 	}
 
-	/* Recolor the persistent base planes that aren't redrawn per frame. */
 	if (wm->taskbar) {
 		uint64_t ch = 0;
 		vp_rgb f = wm->theme.bar_fg, b = wm->theme.bar_bg;
@@ -485,13 +476,10 @@ void wm_remove_window(WM *wm, Window *win)
 	wm->nwins--;
 	wm->taskbar_dirty = true;
 
-	/* Fix up the focused index. */
 	if (wm->nwins == 0) {
 		wm->focused = -1;
 	} else if (wm->focused == idx) {
-		/* focus the now-topmost remaining window */
 		wm->focused = -1;
-		/* pick the highest-z non-minimized window */
 		for (struct ncplane *p = notcurses_top(wm->nc); p;
 		     p = ncplane_below(p)) {
 			Window *cand = ncplane_userptr(p);
@@ -555,7 +543,6 @@ void wm_focus_index(WM *wm, int idx)
 	win->frame_dirty = true;
 	wm->taskbar_dirty = true;
 
-	/* Scroll the taskbar so the newly focused window's slot is visible. */
 	taskbar_reveal(wm, idx);
 
 	/* Keep the taskbar above all windows. */
@@ -638,11 +625,9 @@ void wm_minimize(WM *wm, Window *win)
 	 * their pixel bitmaps off-screen too, which scrolls some terminals. The
 	 * visuals are kept, so restore re-blits them. */
 	sixel_planes_drop(win);
-	/* Park the frame off-screen (content rides along as a bound child). */
 	ncplane_move_yx(win->frame, VP_HIDDEN_Y, win->x);
 
 	if (wm_focused(wm) == win) {
-		/* shift focus to the next visible window */
 		wm->focused = -1;
 		for (int i = 0; i < wm->nwins; i++) {
 			if (!wm->wins[i]->minimized) {
@@ -749,9 +734,9 @@ void wm_handle_resize(WM *wm)
 	if (wm->taskbar) {
 		taskbar_reflow(wm);
 	}
-	background_apply(wm); /* re-blit/repaint the desktop for the new size */
-	settings_icon_reflow(wm); /* keep the launcher icon on-screen */
-	exit_icon_reflow(wm); /* re-anchor to the new bottom-right corner */
+	background_apply(wm);
+	settings_icon_reflow(wm);
+	exit_icon_reflow(wm);
 	for (int i = 0; i < wm->nwins; i++) {
 		Window *win = wm->wins[i];
 		if (win->maximized) {
@@ -766,15 +751,12 @@ void wm_handle_resize(WM *wm)
 	}
 	wm->taskbar_dirty = true;
 	if (wm->settings.open) {
-		wm->settings.dirty =
-			true; /* re-center/redraw the panel for the new size */
+		wm->settings.dirty = true;
 	}
 }
 
 Window *wm_window_at(WM *wm, int y, int x)
 {
-	/* Walk the pile from top to bottom; first frame that contains (y,x) and
-     * isn't minimized wins. */
 	for (struct ncplane *p = notcurses_top(wm->nc); p;
 	     p = ncplane_below(p)) {
 		Window *win = ncplane_userptr(p);
@@ -852,7 +834,6 @@ void wm_render(WM *wm)
 		drew = true;
 	}
 
-	/* Software pointer (console only): a hover move shifts the cell it sits on. */
 	bool want_ptr = wm->draw_cursor && wm->cursor;
 	if (want_ptr &&
 	    (wm->mouse_y != wm->ptr_y || wm->mouse_x != wm->ptr_x)) {
@@ -860,7 +841,7 @@ void wm_render(WM *wm)
 	}
 
 	if (!drew) {
-		return; /* nothing changed; don't pay for a render */
+		return; /* don't pay for a render on unchanged frames */
 	}
 
 	if (want_cursor) {

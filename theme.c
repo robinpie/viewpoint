@@ -39,11 +39,9 @@ void vp_setbg(struct ncplane *p, vp_rgb c)
 	ncplane_set_bg_rgb8(p, (c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
 }
 
-/* ----- presets ----------------------------------------------------------- */
-
 static const VpTheme g_themes[] = {
 	{
-		.name = "midnight", /* == the original hardcoded look */
+		.name = "midnight",
 		.win_focus_fg = 0xffffff,
 		.win_focus_bg = 0x204080,
 		.win_unfocus_fg = 0xc0c0c0,
@@ -296,8 +294,6 @@ const VpTheme *vp_theme_builtin(const char *name)
 	}
 	return NULL;
 }
-
-/* ----- per-color override table ------------------------------------------ */
 
 typedef struct {
 	const char *name;

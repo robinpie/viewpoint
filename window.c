@@ -64,7 +64,6 @@ Window *window_create(WM *wm, int x, int y, int w, int h)
 	win->sb_max = wm->config.scrollback_max;
 	snprintf(win->title, sizeof(win->title), "shell %d", win->id);
 
-	/* Frame plane bound to the desktop (std) plane. */
 	ncplane_options fopts = { 0 };
 	fopts.y = y;
 	fopts.x = x;
@@ -78,7 +77,6 @@ Window *window_create(WM *wm, int x, int y, int w, int h)
 		return NULL;
 	}
 
-	/* Content plane in the 1-cell interior, bound to the frame. */
 	ncplane_options copts = { 0 };
 	copts.y = VP_BORDER;
 	copts.x = VP_BORDER;
@@ -181,7 +179,6 @@ void window_set_geometry(Window *win, int x, int y, int w, int h)
 	win->frame_dirty = true;
 }
 
-/* The login name and hostname are process-stable; resolve each once. */
 static const char *login_name(void)
 {
 	static char name[64];
@@ -206,8 +203,6 @@ static const char *host_name(void)
 	return host;
 }
 
-/* Read pid's current working directory into out, abbreviating a leading $HOME
- * to "~". out is set empty if it can't be read. */
 static void proc_cwd(pid_t pid, char *out, size_t outlen)
 {
 	char link[64];
@@ -232,10 +227,6 @@ static void proc_cwd(pid_t pid, char *out, size_t outlen)
 	snprintf(out, outlen, "%s", cwd);
 }
 
-/* Recompute the title from the PTY's foreground process group: the running
- * program's name, or - when the shell itself is in the foreground (idle at its
- * prompt) - user@host:cwd. Returns true if the title changed (so callers can
- * refresh the frame/taskbar). */
 static uint64_t mono_ns(void)
 {
 	struct timespec ts;
@@ -333,7 +324,6 @@ void window_draw_frame(WM *wm, Window *win)
 	}
 	ncplane_set_styles(f, NCSTYLE_NONE);
 
-	/* Side borders and bottom (interior is hidden by the content plane). */
 	for (int row = 1; row < h - 1; row++) {
 		ncplane_putegc_yx(f, row, 0, "│", NULL); /* │ */
 		ncplane_putegc_yx(f, row, w - 1, "│", NULL);
@@ -352,7 +342,6 @@ void window_draw_frame(WM *wm, Window *win)
 	}
 	ncplane_putegc_yx(f, 0, w - 1, "┐", NULL); /* ┐ */
 
-	/* Window buttons near the right corner: minimize, maximize, close. */
 	const char *btns = "[_][▢][x]"; /* [_][▢][x] : 9 columns wide */
 	int btnw = 9;
 	int btnx = w - 1 - btnw;
@@ -362,14 +351,12 @@ void window_draw_frame(WM *wm, Window *win)
 		btnx = w; /* no room; title may use full width */
 	}
 
-	/* Title text between the left corner and the buttons. */
 	int tstart = 1; /* just inside the ┌ corner */
 	int tend = (btnx < w) ? btnx - 1 : w - 1;
 	int avail = tend - tstart;
 	if (avail > 0) {
 		char buf[VP_TITLE_MAX + 32];
 		if (win->sb_offset > 0) {
-			/* Scrolled into history: show how far back the view is. */
 			snprintf(buf, sizeof(buf), "%d:[↑%d] %s", win->id,
 				 win->sb_offset, win->title);
 		} else {

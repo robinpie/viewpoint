@@ -60,7 +60,6 @@ bool config_path(char *buf, size_t buflen)
 	return n > 0 && (size_t)n < buflen;
 }
 
-/* Strip leading/trailing ASCII whitespace in place; returns the new start. */
 static char *trim(char *s)
 {
 	while (*s && isspace((unsigned char)*s)) {
@@ -88,7 +87,6 @@ static bool is_marker(const char *line, const char *marker)
 	return strncmp(line, marker, strlen(marker)) == 0;
 }
 
-/* Parse a 6-digit hex color ("204080" or "#204080") into *out. */
 static bool parse_hex_color(const char *s, vp_rgb *out)
 {
 	if (*s == '#') {
@@ -103,7 +101,6 @@ static bool parse_hex_color(const char *s, vp_rgb *out)
 	return true;
 }
 
-/* Set (or replace) the per-color override for field `idx` in cfg. */
 static bool set_color_override(VpConfig *cfg, int idx, vp_rgb color)
 {
 	for (int i = 0; i < cfg->n_color_overrides; i++) {
@@ -330,13 +327,11 @@ static bool config_apply(VpConfig *cfg, const char *key, char *val, int line)
 	return false;
 }
 
-/* Process one raw config line (mutated in place): trim, skip blanks/comments,
- * split "key = value" and dispatch. */
 static void config_apply_line(VpConfig *cfg, char *buf, int line)
 {
 	char *s = trim(buf);
 	if (*s == '\0' || *s == '#') {
-		return; /* blank or comment */
+		return;
 	}
 	char *eq = strchr(s, '=');
 	if (!eq) {
@@ -350,7 +345,6 @@ static void config_apply_line(VpConfig *cfg, char *buf, int line)
 	config_apply(cfg, key, val, line);
 }
 
-/* Append s to a growable buffer (b, len, cap), keeping it NUL-terminated. */
 static char *buf_append(char *b, size_t *len, size_t *cap, const char *s)
 {
 	size_t add = strlen(s);
@@ -372,7 +366,6 @@ static char *buf_append(char *b, size_t *len, size_t *cap, const char *s)
 	return b;
 }
 
-/* Apply every line of a newline-separated text blob. */
 static void config_apply_text(VpConfig *cfg, const char *text)
 {
 	if (!text) {
@@ -405,8 +398,6 @@ void config_defaults(VpConfig *cfg)
 	cfg->exit_icon_y = cfg->exit_icon_x = -1;
 	cfg->scrollback_max = VP_SCROLLBACK_MAX;
 	cfg->scroll_step = VP_SCROLL_STEP;
-	/* Theming: no preset chosen (use the built-in default) and no background
-	 * override (inherit the preset's). bg_fit only matters for image backgrounds. */
 	cfg->theme_name = NULL;
 	cfg->bg_mode = -1;
 	cfg->bg_fit = FIT_STRETCH;
@@ -456,7 +447,6 @@ static void mkdir_parents(const char *path)
 	}
 }
 
-/* Action bound to chord (id,mods) in cfg, or -1 if that chord is unbound. */
 static int chord_action(const VpConfig *cfg, uint32_t id, unsigned mods)
 {
 	for (int i = 0; i < cfg->nkeys; i++) {
@@ -508,14 +498,12 @@ static void write_inapp_diff(FILE *f, const VpConfig *cfg, const VpConfig *base)
 			cfg->keep_customizations ? "true" : "false");
 	}
 
-	/* Theme preset, when chosen and differing from the baseline. */
 	if (cfg->theme_name &&
 	    (!base->theme_name ||
 	     strcmp(cfg->theme_name, base->theme_name) != 0)) {
 		fprintf(f, "theme = %s\n", cfg->theme_name);
 	}
 
-	/* Desktop background override, when set and differing from the baseline. */
 	if (cfg->bg_mode >= 0 && setting_differs(cfg, base, SETTING_BACKGROUND)) {
 		if (cfg->bg_mode == BG_SOLID) {
 			fprintf(f, "background = solid\n");
@@ -535,7 +523,6 @@ static void write_inapp_diff(FILE *f, const VpConfig *cfg, const VpConfig *base)
 		}
 	}
 
-	/* Per-color overrides not already present (identical) in the baseline. */
 	for (int i = 0; i < cfg->n_color_overrides; i++) {
 		int idx = cfg->color_overrides[i].field_idx;
 		vp_rgb c = cfg->color_overrides[i].color;
@@ -553,7 +540,6 @@ static void write_inapp_diff(FILE *f, const VpConfig *cfg, const VpConfig *base)
 		}
 	}
 
-	/* Chords present in base but gone from the live keymap: unbind them. */
 	for (int i = 0; i < base->nkeys; i++) {
 		if (chord_action(cfg, base->keymap[i].id,
 				 base->keymap[i].mods) < 0) {
@@ -564,7 +550,6 @@ static void write_inapp_diff(FILE *f, const VpConfig *cfg, const VpConfig *base)
 		}
 	}
 
-	/* Chords whose action is new or changed relative to base: (re)bind them. */
 	for (int i = 0; i < cfg->nkeys; i++) {
 		int ba = chord_action(base, cfg->keymap[i].id,
 				      cfg->keymap[i].mods);
@@ -578,7 +563,6 @@ static void write_inapp_diff(FILE *f, const VpConfig *cfg, const VpConfig *base)
 	}
 }
 
-/* Does the manual section change the chord(s) bound to `act` vs the defaults? */
 static bool manual_touches_action(const VpConfig *defs, const VpConfig *mbase,
 				  vp_action act)
 {
@@ -920,7 +904,6 @@ void config_load(VpConfig *cfg)
 	char *manual = saw_marker ? man : pre;
 	free(saw_marker ? pre : man);
 
-	/* Trim a captured manual block that is only blank lines down to nothing. */
 	if (manual) {
 		const char *p = manual;
 		while (*p == '\n' || *p == ' ' || *p == '\t' || *p == '\r') {
