@@ -314,6 +314,7 @@ int main(void)
 	free(pfds);
 	exit_icon_teardown(&wm);
 	settings_teardown(&wm);
+	background_free(&wm);
 	config_free(&wm.config);
 	gpm_teardown(&wm);
 	/* Undo the motion-tracking modes we re-asserted (notcurses_stop resets the

@@ -91,6 +91,15 @@ The `Keybindings` tile opens the keybinding editor. It lists every action with i
 - `D` to unbind the selected action
 - `S` to save now, `Esc` (or click outside the panel) to return to the grid
 
+The `Appearance` tile changes the look:
+
+- `↑`/`↓` (or click a row) to select a row
+- `←`/`→` to change the `Theme`, `Background` mode, `Image fit`, or the `Keep tweaks on theme switch` toggle (applied instantly as a live preview)
+- `Enter` on `Image path` to type/paste a background image file; `Enter` on a color row to type a hex color (`RRGGBB`)
+- `D` resets the selected color (or clears the image) back to the theme's default
+- By default, switching the theme resets your per-color and background tweaks so the new preset applies fully; flip `Keep tweaks on theme switch` to `yes` to carry them across theme changes instead
+- `S` to save now, `Esc` (or click outside the panel) to return to the grid
+
 The `Terminal` tile adjusts per-window scrollback behavior:
 
 - `↑`/`↓` (or click a row) to select a setting
@@ -131,6 +140,23 @@ toggle = f12
 scrollback  = 2000   # per-window scrollback lines (0 disables it)
 scroll_step = 3      # lines scrolled per mouse-wheel notch
 
+# Theme (presets: midnight, paper, forest, amber, mono):
+theme = forest
+
+# Desktop background (overrides the theme's): one of
+background = solid               # flat fill in the theme's colors
+background = pattern ✦           # tile a glyph across the desktop
+background = image ~/wall.png    # an image (needs a pixel-capable terminal)
+bg_fit     = stretch             # image fit: stretch | scale | center | tile
+
+# Override an individual color on top of the chosen theme:  color = <element> <hex>
+color = title_focus_bg 802040
+color = desktop_bg     101216
+
+# Keep color/background overrides when switching themes (default false, i.e. a
+# theme switch resets them so the new preset applies in full):
+keep_customizations = false
+
 # Pin a desktop icon's top-left corner:  icon = <name> <x> <y>
 # (names: settings, exit. Normally written automatically when you drag an icon.)
 icon = settings 1 1
@@ -152,7 +178,6 @@ Resizing a window clears its images (the reflow isn't tracked for fixed-pixel pl
 ## Roadmap
 
 * kitty graphics passthrough support
-* themes, including custom desktop backgrounds
 * viewpoint-native widget framework
 
 ### Maybes

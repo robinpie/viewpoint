@@ -35,6 +35,7 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Desktop launcher: a roomy icon "tile" (a big gear above a label), top-left.
@@ -72,6 +73,7 @@ typedef struct {
 static const grid_entry g_grid_entries[] = {
 	{ "⌨", "Keybindings", SETTINGS_VIEW_KEYBINDINGS },
 	{ "▤", "Terminal", SETTINGS_VIEW_TERMINAL },
+	{ "▦", "Appearance", SETTINGS_VIEW_APPEARANCE },
 };
 #define GRID_ENTRY_COUNT \
 	((int)(sizeof(g_grid_entries) / sizeof(g_grid_entries[0])))
@@ -127,6 +129,8 @@ static void clamp_icon_pos(const WM *wm, int h, int w, int *y, int *x)
 		*x = 0;
 }
 
+static int app_total_rows(void); /* Appearance view row count (defined below) */
+
 static int total_rows(void)
 {
 	return keymap_action_count() + 1;
@@ -168,9 +172,12 @@ static void panel_geom(const WM *wm, int *y, int *x, int *h, int *w)
 		W = PANEL_W;
 		if (W < 24)
 			W = 24;
-		int rows = (wm->settings.view == SETTINGS_VIEW_TERMINAL) ?
-				   TERM_ROWS :
-				   total_rows();
+		int rows = total_rows();
+		if (wm->settings.view == SETTINGS_VIEW_TERMINAL) {
+			rows = TERM_ROWS;
+		} else if (wm->settings.view == SETTINGS_VIEW_APPEARANCE) {
+			rows = app_total_rows();
+		}
 		H = rows + PANEL_CHROME;
 		if (H < PANEL_CHROME + 1)
 			H = PANEL_CHROME + 1;
@@ -194,6 +201,43 @@ static int viewport_rows(const WM *wm)
 	int H = wm->settings.panel ? (int)ncplane_dim_y(wm->settings.panel) : 0;
 	int v = H - PANEL_CHROME;
 	return v < 1 ? 1 : v;
+}
+
+/* The Appearance view's fixed rows (a row per themeable color follows them). */
+enum {
+	APP_ROW_THEME = 0,
+	APP_ROW_BG,
+	APP_ROW_FIT,
+	APP_ROW_IMAGE,
+	APP_ROW_KEEP,
+	APP_FIXED_ROWS,
+};
+static int app_total_rows(void)
+{
+	return APP_FIXED_ROWS + vp_theme_field_count();
+}
+
+
+/* Clamp selection + scroll for a scrolling list of `n` rows. */
+static void clamp_scroll_n(WM *wm, int n)
+{
+	Settings *s = &wm->settings;
+	int v = viewport_rows(wm);
+	if (s->sel < 0)
+		s->sel = 0;
+	if (s->sel >= n)
+		s->sel = n - 1;
+	if (s->sel < s->scroll)
+		s->scroll = s->sel;
+	if (s->sel >= s->scroll + v)
+		s->scroll = s->sel - v + 1;
+	int maxscroll = n - v;
+	if (maxscroll < 0)
+		maxscroll = 0;
+	if (s->scroll > maxscroll)
+		s->scroll = maxscroll;
+	if (s->scroll < 0)
+		s->scroll = 0;
 }
 
 static void clamp_scroll(WM *wm)
@@ -249,18 +293,29 @@ void settings_init(WM *wm)
 	if (!wm->settings.icon) {
 		return;
 	}
+	settings_icon_redraw(wm);
+}
+
+void settings_icon_redraw(WM *wm)
+{
 	struct ncplane *p = wm->settings.icon;
+	if (!p) {
+		return;
+	}
 
 	/* Tile background. */
 	uint64_t base = 0;
-	ncchannels_set_fg_rgb8(&base, 0xe0, 0xe0, 0xe8);
-	ncchannels_set_bg_rgb8(&base, 0x2a, 0x2a, 0x3c);
+	vp_rgb fg = wm->theme.icon_fg, bg = wm->theme.icon_bg;
+	ncchannels_set_fg_rgb8(&base, (fg >> 16) & 0xff, (fg >> 8) & 0xff,
+			       fg & 0xff);
+	ncchannels_set_bg_rgb8(&base, (bg >> 16) & 0xff, (bg >> 8) & 0xff,
+			       bg & 0xff);
 	ncplane_set_base(p, " ", 0, base);
-	ncplane_set_bg_rgb8(p, 0x2a, 0x2a, 0x3c);
+	vp_setbg(p, wm->theme.icon_bg);
 	ncplane_erase(p);
 
 	/* Rounded tile border. */
-	ncplane_set_fg_rgb8(p, 0x60, 0x80, 0xc0);
+	vp_setfg(p, wm->theme.icon_border);
 	ncplane_putegc_yx(p, 0, 0, "╭", NULL);
 	ncplane_putegc_yx(p, 0, ICON_W - 1, "╮", NULL);
 	ncplane_putegc_yx(p, ICON_H - 1, 0, "╰", NULL);
@@ -275,11 +330,11 @@ void settings_init(WM *wm)
 	}
 
 	/* Big gear, centered on its own row. */
-	ncplane_set_fg_rgb8(p, 0x9a, 0xd0, 0xff);
+	vp_setfg(p, wm->theme.icon_glyph);
 	ncplane_putegc_yx(p, 1, ICON_W / 2 - 1, "⚙", NULL);
 
 	/* Label beneath it. */
-	ncplane_set_fg_rgb8(p, 0xff, 0xff, 0xff);
+	vp_setfg(p, wm->theme.icon_fg);
 	ncplane_putstr_yx(p, 2, 2, "Settings");
 }
 
@@ -346,18 +401,29 @@ void exit_icon_init(WM *wm)
 	if (!wm->exit_icon) {
 		return;
 	}
+	exit_icon_redraw(wm);
+}
+
+void exit_icon_redraw(WM *wm)
+{
 	struct ncplane *p = wm->exit_icon;
+	if (!p) {
+		return;
+	}
 
 	/* Tile background (a warm red-grey to read as "quit"). */
 	uint64_t base = 0;
-	ncchannels_set_fg_rgb8(&base, 0xf0, 0xe0, 0xe0);
-	ncchannels_set_bg_rgb8(&base, 0x3c, 0x2a, 0x2a);
+	vp_rgb fg = wm->theme.exit_fg, bg = wm->theme.exit_bg;
+	ncchannels_set_fg_rgb8(&base, (fg >> 16) & 0xff, (fg >> 8) & 0xff,
+			       fg & 0xff);
+	ncchannels_set_bg_rgb8(&base, (bg >> 16) & 0xff, (bg >> 8) & 0xff,
+			       bg & 0xff);
 	ncplane_set_base(p, " ", 0, base);
-	ncplane_set_bg_rgb8(p, 0x3c, 0x2a, 0x2a);
+	vp_setbg(p, wm->theme.exit_bg);
 	ncplane_erase(p);
 
 	/* Rounded tile border. */
-	ncplane_set_fg_rgb8(p, 0xc0, 0x60, 0x60);
+	vp_setfg(p, wm->theme.exit_border);
 	ncplane_putegc_yx(p, 0, 0, "╭", NULL);
 	ncplane_putegc_yx(p, 0, EXIT_W - 1, "╮", NULL);
 	ncplane_putegc_yx(p, EXIT_H - 1, 0, "╰", NULL);
@@ -372,11 +438,11 @@ void exit_icon_init(WM *wm)
 	}
 
 	/* Big power symbol, centered on its own row. */
-	ncplane_set_fg_rgb8(p, 0xff, 0x9a, 0x9a);
+	vp_setfg(p, wm->theme.exit_glyph);
 	ncplane_putegc_yx(p, 1, EXIT_W / 2 - 1, "⏻", NULL);
 
 	/* Label beneath it, centered in the tile. */
-	ncplane_set_fg_rgb8(p, 0xff, 0xff, 0xff);
+	vp_setfg(p, wm->theme.exit_fg);
 	static const char label[] = "Exit";
 	ncplane_putstr_yx(p, 2, (EXIT_W - (int)(sizeof(label) - 1)) / 2, label);
 }
@@ -434,8 +500,11 @@ void settings_open(WM *wm)
 		return;
 	}
 	uint64_t base = 0;
-	ncchannels_set_fg_rgb8(&base, 0xd0, 0xd0, 0xd8);
-	ncchannels_set_bg_rgb8(&base, 0x1c, 0x1c, 0x28);
+	vp_rgb pfg = wm->theme.panel_fg, pbg = wm->theme.panel_bg;
+	ncchannels_set_fg_rgb8(&base, (pfg >> 16) & 0xff, (pfg >> 8) & 0xff,
+			       pfg & 0xff);
+	ncchannels_set_bg_rgb8(&base, (pbg >> 16) & 0xff, (pbg >> 8) & 0xff,
+			       pbg & 0xff);
 	ncplane_set_base(s->panel, " ", 0, base);
 
 	s->open = true;
@@ -457,6 +526,7 @@ static void settings_set_view(WM *wm, settings_view v)
 	Settings *s = &wm->settings;
 	s->view = v;
 	s->capturing = false;
+	s->editing = false;
 	s->dirty = true;
 	if (v == SETTINGS_VIEW_KEYBINDINGS) {
 		s->sel = 0;
@@ -468,6 +538,11 @@ static void settings_set_view(WM *wm, settings_view v)
 		s->scroll = 0;
 		snprintf(s->status, sizeof(s->status),
 			 "←/→: adjust   S: save   Esc: back");
+	} else if (v == SETTINGS_VIEW_APPEARANCE) {
+		s->sel = 0;
+		s->scroll = 0;
+		snprintf(s->status, sizeof(s->status),
+			 "←/→: change   Enter: edit   D: reset   S: save");
 	} else {
 		snprintf(s->status, sizeof(s->status),
 			 "↑/↓/←/→: select   Enter: open   Esc: close");
@@ -493,6 +568,7 @@ void settings_close(WM *wm)
 	}
 	s->open = false;
 	s->capturing = false;
+	s->editing = false;
 	if (s->panel) {
 		ncplane_destroy(s->panel);
 		s->panel = NULL;
@@ -721,6 +797,326 @@ static void settings_terminal_key(WM *wm, const ncinput *ni)
 	}
 }
 
+/* ----- the Appearance view ----------------------------------------------- */
+
+static const char *bg_mode_name(vp_bg_mode m)
+{
+	switch (m) {
+	case BG_SOLID:
+		return "solid";
+	case BG_PATTERN:
+		return "pattern";
+	case BG_IMAGE:
+		return "image";
+	}
+	return "?";
+}
+
+static const char *bg_fit_name(vp_bg_fit f)
+{
+	switch (f) {
+	case FIT_STRETCH:
+		return "stretch";
+	case FIT_SCALE:
+		return "scale";
+	case FIT_CENTER:
+		return "center";
+	case FIT_TILE:
+		return "tile";
+	}
+	return "?";
+}
+
+/* Index of the active preset (the one config.theme_name names, else default). */
+static int theme_current_index(WM *wm)
+{
+	const char *want = wm->config.theme_name ? wm->config.theme_name :
+						   vp_theme_default()->name;
+	for (int i = 0; i < vp_theme_count(); i++) {
+		if (strcmp(vp_theme_by_index(i)->name, want) == 0) {
+			return i;
+		}
+	}
+	return 0;
+}
+
+/* Re-apply the live theme after a change. A change made here is authoritative:
+ * drop any manual-section line that would otherwise reassert itself on the next
+ * load, so the menu choice wins (colors are dropped per-element by the caller). */
+static void appearance_applied(WM *wm, vp_setting setting, const char *what)
+{
+	Settings *s = &wm->settings;
+	if (setting != SETTING_COLORS) {
+		config_manual_override(&wm->config, setting);
+	}
+	theme_apply(wm);
+	snprintf(s->status, sizeof(s->status), "%s", what);
+	s->dirty = true;
+}
+
+static void appearance_cycle_theme(WM *wm, int dir)
+{
+	int n = vp_theme_count();
+	int next = ((theme_current_index(wm) + dir) % n + n) % n;
+	free(wm->config.theme_name);
+	wm->config.theme_name = strdup(vp_theme_by_index(next)->name);
+
+	/* Unless the user opted to keep customizations, picking a preset is a fresh
+	 * start: discard the per-color and background tweaks layered on the previous
+	 * theme so the new one applies in full instead of being shadowed. */
+	if (!wm->config.keep_customizations) {
+		wm->config.n_color_overrides = 0;
+		wm->config.bg_mode = -1;
+		wm->config.bg_fit = FIT_STRETCH;
+		free(wm->config.bg_glyph);
+		wm->config.bg_glyph = NULL;
+		free(wm->config.bg_image_path);
+		wm->config.bg_image_path = NULL;
+	}
+
+	char msg[64];
+	snprintf(msg, sizeof(msg), "Theme = %s", vp_theme_by_index(next)->name);
+	appearance_applied(wm, SETTING_THEME, msg);
+}
+
+static void appearance_toggle_keep(WM *wm)
+{
+	wm->config.keep_customizations = !wm->config.keep_customizations;
+	appearance_applied(wm, SETTING_KEEP_CUSTOM,
+			   wm->config.keep_customizations ?
+				   "Keep customizations on theme switch = yes" :
+				   "Keep customizations on theme switch = no");
+}
+
+static void appearance_cycle_bg(WM *wm, int dir)
+{
+	int m = wm->config.bg_mode < 0 ? (int)wm->theme.bg_mode :
+					 wm->config.bg_mode;
+	m = ((m + dir) % 3 + 3) % 3;
+	wm->config.bg_mode = m;
+	char msg[64];
+	snprintf(msg, sizeof(msg), "Background = %s",
+		 bg_mode_name((vp_bg_mode)m));
+	appearance_applied(wm, SETTING_BACKGROUND, msg);
+}
+
+static void appearance_cycle_fit(WM *wm, int dir)
+{
+	wm->config.bg_fit = ((wm->config.bg_fit + dir) % 4 + 4) % 4;
+	char msg[64];
+	snprintf(msg, sizeof(msg), "Image fit = %s",
+		 bg_fit_name((vp_bg_fit)wm->config.bg_fit));
+	appearance_applied(wm, SETTING_BACKGROUND, msg);
+}
+
+/* Begin in-app text entry. kind 0 = image path, 1 = color hex (color_idx). */
+static void appearance_edit_start(WM *wm, int kind, int color_idx,
+				  const char *initial)
+{
+	Settings *s = &wm->settings;
+	s->editing = true;
+	s->edit_kind = kind;
+	s->edit_color_idx = color_idx;
+	snprintf(s->input, sizeof(s->input), "%s", initial ? initial : "");
+	s->input_len = (int)strlen(s->input);
+	snprintf(s->status, sizeof(s->status),
+		 kind == 0 ? "Type an image path · Enter: apply · Esc: cancel" :
+			     "Type a hex color (RRGGBB) · Enter: apply · Esc: cancel");
+	s->dirty = true;
+}
+
+static void appearance_edit_commit(WM *wm)
+{
+	Settings *s = &wm->settings;
+	s->editing = false;
+	if (s->edit_kind == 0) {
+		free(wm->config.bg_image_path);
+		wm->config.bg_image_path =
+			s->input[0] ? strdup(s->input) : NULL;
+		if (s->input[0]) {
+			wm->config.bg_mode = BG_IMAGE;
+		}
+		appearance_applied(wm, SETTING_BACKGROUND,
+				   s->input[0] ? "Background image set" :
+						 "Background image cleared");
+		if (s->input[0] && !wm->pixel_ok) {
+			snprintf(s->status, sizeof(s->status),
+				 "Image set, but this terminal has no pixel support");
+		}
+	} else {
+		const char *t = s->input;
+		if (*t == '#') {
+			t++;
+		}
+		char *end = NULL;
+		unsigned long v = strtoul(t, &end, 16);
+		if (end == t || *end != '\0' || v > 0xffffffUL) {
+			snprintf(s->status, sizeof(s->status),
+				 "Bad hex color '%.32s'", s->input);
+			s->dirty = true;
+			return;
+		}
+		config_set_color_override(&wm->config, s->edit_color_idx,
+					  (vp_rgb)v);
+		config_manual_override_color(&wm->config, s->edit_color_idx);
+		appearance_applied(wm, SETTING_COLORS, "Color set");
+	}
+	s->dirty = true;
+}
+
+static void appearance_edit_key(WM *wm, const ncinput *ni)
+{
+	Settings *s = &wm->settings;
+	if (ni->id == NCKEY_ESC) {
+		s->editing = false;
+		snprintf(s->status, sizeof(s->status), "Edit cancelled");
+		s->dirty = true;
+		return;
+	}
+	if (ni->id == NCKEY_ENTER) {
+		appearance_edit_commit(wm);
+		return;
+	}
+	if (ni->id == NCKEY_BACKSPACE) {
+		if (s->input_len > 0) {
+			s->input[--s->input_len] = '\0';
+			s->dirty = true;
+		}
+		return;
+	}
+	if (ni->id >= 0x20 && ni->id < 0x7f &&
+	    s->input_len < (int)sizeof(s->input) - 1) {
+		s->input[s->input_len++] = (char)ni->id;
+		s->input[s->input_len] = '\0';
+		s->dirty = true;
+	}
+}
+
+/* ←/→ on a row: cycle the fixed rows; color rows are edited via Enter. */
+static void appearance_adjust(WM *wm, int dir)
+{
+	switch (wm->settings.sel) {
+	case APP_ROW_THEME:
+		appearance_cycle_theme(wm, dir);
+		break;
+	case APP_ROW_BG:
+		appearance_cycle_bg(wm, dir);
+		break;
+	case APP_ROW_FIT:
+		appearance_cycle_fit(wm, dir);
+		break;
+	case APP_ROW_KEEP:
+		appearance_toggle_keep(wm);
+		break;
+	default:
+		break;
+	}
+}
+
+/* Enter on a row: cycle/toggle fixed rows; open text entry for path / color. */
+static void appearance_enter(WM *wm)
+{
+	int sel = wm->settings.sel;
+	if (sel == APP_ROW_IMAGE) {
+		appearance_edit_start(wm, 0, 0, wm->config.bg_image_path);
+	} else if (sel < APP_FIXED_ROWS) {
+		appearance_adjust(wm, +1);
+	} else {
+		int idx = sel - APP_FIXED_ROWS;
+		char cur[8];
+		snprintf(cur, sizeof(cur), "%06x",
+			 vp_theme_field_get(&wm->theme, idx));
+		appearance_edit_start(wm, 1, idx, cur);
+	}
+}
+
+/* D on a row: clear the image path / a color override back to the preset. */
+static void appearance_clear(WM *wm)
+{
+	int sel = wm->settings.sel;
+	if (sel == APP_ROW_IMAGE) {
+		free(wm->config.bg_image_path);
+		wm->config.bg_image_path = NULL;
+		appearance_applied(wm, SETTING_BACKGROUND,
+				   "Background image cleared");
+	} else if (sel >= APP_FIXED_ROWS) {
+		int idx = sel - APP_FIXED_ROWS;
+		config_clear_color_override(&wm->config, idx);
+		config_manual_override_color(&wm->config, idx);
+		appearance_applied(wm, SETTING_COLORS, "Color reset to preset");
+	}
+}
+
+static void settings_appearance_key(WM *wm, const ncinput *ni)
+{
+	Settings *s = &wm->settings;
+	if (s->editing) {
+		appearance_edit_key(wm, ni);
+		return;
+	}
+	switch (ni->id) {
+	case NCKEY_UP:
+		s->sel--;
+		clamp_scroll_n(wm, app_total_rows());
+		s->dirty = true;
+		break;
+	case NCKEY_DOWN:
+		s->sel++;
+		clamp_scroll_n(wm, app_total_rows());
+		s->dirty = true;
+		break;
+	case NCKEY_PGUP:
+		s->sel -= viewport_rows(wm);
+		clamp_scroll_n(wm, app_total_rows());
+		s->dirty = true;
+		break;
+	case NCKEY_PGDOWN:
+		s->sel += viewport_rows(wm);
+		clamp_scroll_n(wm, app_total_rows());
+		s->dirty = true;
+		break;
+	case NCKEY_HOME:
+		s->sel = 0;
+		clamp_scroll_n(wm, app_total_rows());
+		s->dirty = true;
+		break;
+	case NCKEY_END:
+		s->sel = app_total_rows() - 1;
+		clamp_scroll_n(wm, app_total_rows());
+		s->dirty = true;
+		break;
+	case NCKEY_LEFT:
+		appearance_adjust(wm, -1);
+		break;
+	case NCKEY_RIGHT:
+		appearance_adjust(wm, +1);
+		break;
+	case NCKEY_ENTER:
+		appearance_enter(wm);
+		break;
+	case 'd':
+	case 'D':
+	case NCKEY_DEL:
+		appearance_clear(wm);
+		break;
+	case 's':
+	case 'S':
+		snprintf(s->status, sizeof(s->status),
+			 config_save(&wm->config) ?
+				 "Saved" :
+				 "Save failed (see VP_DEBUG)");
+		s->dirty = true;
+		break;
+	case NCKEY_ESC:
+	case 'q':
+	case 'Q':
+		settings_back(wm);
+		break;
+	default:
+		break;
+	}
+}
+
 void settings_handle_key(WM *wm, const ncinput *ni)
 {
 	Settings *s = &wm->settings;
@@ -734,6 +1130,10 @@ void settings_handle_key(WM *wm, const ncinput *ni)
 	}
 	if (s->view == SETTINGS_VIEW_TERMINAL) {
 		settings_terminal_key(wm, ni);
+		return;
+	}
+	if (s->view == SETTINGS_VIEW_APPEARANCE) {
+		settings_appearance_key(wm, ni);
 		return;
 	}
 
@@ -861,6 +1261,22 @@ void settings_click(WM *wm, int btn, int y, int x)
 		return;
 	}
 
+	/* Appearance view: clicking a row selects it (change with ←/→, Enter to edit). */
+	if (s->view == SETTINGS_VIEW_APPEARANCE) {
+		if (s->editing) {
+			return; /* ignore clicks while typing */
+		}
+		int listrow = rely - 1; /* row 0 is the top border */
+		if (listrow >= 0 && listrow < viewport_rows(wm)) {
+			int row = s->scroll + listrow;
+			if (row >= 0 && row < app_total_rows()) {
+				s->sel = row;
+				s->dirty = true;
+			}
+		}
+		return;
+	}
+
 	/* Click on a list row: select it and start capturing immediately. */
 	int listrow = rely - 1; /* row 0 is the top border */
 	if (listrow >= 0 && listrow < viewport_rows(wm)) {
@@ -886,6 +1302,15 @@ void settings_scroll(WM *wm, int dir)
 			    dir < 0 ? +1 : -1); /* wheel up raises the value */
 		return;
 	}
+	if (s->view == SETTINGS_VIEW_APPEARANCE) {
+		if (s->editing) {
+			return;
+		}
+		s->sel += dir;
+		clamp_scroll_n(wm, app_total_rows());
+		s->dirty = true;
+		return;
+	}
 	if (s->view != SETTINGS_VIEW_KEYBINDINGS) {
 		return;
 	}
@@ -896,9 +1321,10 @@ void settings_scroll(WM *wm, int dir)
 
 /* ----- drawing ----------------------------------------------------------- */
 
-static void draw_border(struct ncplane *p, int W, int H, const char *title)
+static void draw_border(WM *wm, struct ncplane *p, int W, int H,
+			const char *title)
 {
-	ncplane_set_fg_rgb8(p, 0x60, 0x80, 0xc0);
+	vp_setfg(p, wm->theme.panel_accent);
 	ncplane_putegc_yx(p, 0, 0, "┌", NULL);
 	ncplane_putegc_yx(p, 0, W - 1, "┐", NULL);
 	ncplane_putegc_yx(p, H - 1, 0, "└", NULL);
@@ -911,15 +1337,16 @@ static void draw_border(struct ncplane *p, int W, int H, const char *title)
 		ncplane_putegc_yx(p, r, 0, "│", NULL);
 		ncplane_putegc_yx(p, r, W - 1, "│", NULL);
 	}
-	ncplane_set_fg_rgb8(p, 0xff, 0xff, 0xff);
+	vp_setfg(p, wm->theme.panel_sel_fg);
 	ncplane_putstr_yx(p, 0, 2, title);
 }
 
 /* Draw the bottom status line shared by both views. */
-static void draw_status(struct ncplane *p, int W, int H, const char *status)
+static void draw_status(WM *wm, struct ncplane *p, int W, int H,
+			const char *status)
 {
-	ncplane_set_bg_rgb8(p, 0x1c, 0x1c, 0x28);
-	ncplane_set_fg_rgb8(p, 0xc0, 0xc0, 0x80);
+	vp_setbg(p, wm->theme.panel_bg);
+	vp_setfg(p, wm->theme.panel_status);
 	char sbuf[128];
 	snprintf(sbuf, sizeof(sbuf), "%-*.*s", W - 4, W - 4, status);
 	ncplane_putstr_yx(p, H - 2, 2, sbuf);
@@ -929,21 +1356,22 @@ static void draw_status(struct ncplane *p, int W, int H, const char *status)
 
 /* One tile: rounded box, a glyph, and a caption. `populated` tiles that aren't
  * selected read as live; empty cells are drawn dim. The selected tile glows. */
-static void draw_tile(struct ncplane *p, int ty, int tx, const char *glyph,
-		      const char *label, bool populated, bool selected)
+static void draw_tile(WM *wm, struct ncplane *p, int ty, int tx,
+		      const char *glyph, const char *label, bool populated,
+		      bool selected)
 {
 	if (selected) {
-		ncplane_set_fg_rgb8(p, 0x9a, 0xd0, 0xff);
-		ncplane_set_bg_rgb8(p, 0x20, 0x50, 0xa0);
+		vp_setfg(p, wm->theme.panel_sel_fg);
+		vp_setbg(p, wm->theme.panel_sel_bg);
 		for (int r = 1; r < TILE_H - 1; r++)
 			for (int c = 1; c < TILE_W - 1; c++)
 				ncplane_putchar_yx(p, ty + r, tx + c, ' ');
 	} else if (populated) {
-		ncplane_set_fg_rgb8(p, 0x60, 0x80, 0xc0);
-		ncplane_set_bg_rgb8(p, 0x1c, 0x1c, 0x28);
+		vp_setfg(p, wm->theme.panel_accent);
+		vp_setbg(p, wm->theme.panel_bg);
 	} else {
-		ncplane_set_fg_rgb8(p, 0x3a, 0x3a, 0x4a);
-		ncplane_set_bg_rgb8(p, 0x1c, 0x1c, 0x28);
+		vp_setfg(p, wm->theme.panel_hint);
+		vp_setbg(p, wm->theme.panel_bg);
 	}
 
 	ncplane_putegc_yx(p, ty, tx, "╭", NULL);
@@ -965,9 +1393,9 @@ static void draw_tile(struct ncplane *p, int ty, int tx, const char *glyph,
 
 	/* Glyph centered near the top, caption beneath it. */
 	if (selected) {
-		ncplane_set_fg_rgb8(p, 0xff, 0xff, 0xff);
+		vp_setfg(p, wm->theme.panel_sel_fg);
 	} else {
-		ncplane_set_fg_rgb8(p, 0x9a, 0xd0, 0xff);
+		vp_setfg(p, wm->theme.panel_accent);
 	}
 	if (glyph) {
 		ncplane_putegc_yx(p, ty + 1, tx + TILE_W / 2 - 1, glyph, NULL);
@@ -985,7 +1413,7 @@ static void draw_grid(WM *wm, struct ncplane *p, int W, int H)
 {
 	Settings *s = &wm->settings;
 	ncplane_erase(p);
-	draw_border(p, W, H, " Settings ");
+	draw_border(wm, p, W, H, " Settings ");
 
 	for (int i = 0; i < GRID_CELLS; i++) {
 		int ty, tx;
@@ -993,32 +1421,33 @@ static void draw_grid(WM *wm, struct ncplane *p, int W, int H)
 		bool populated = i < GRID_ENTRY_COUNT;
 		const char *glyph = populated ? g_grid_entries[i].glyph : NULL;
 		const char *label = populated ? g_grid_entries[i].label : NULL;
-		draw_tile(p, ty, tx, glyph, label, populated,
+		draw_tile(wm, p, ty, tx, glyph, label, populated,
 			  i == s->grid_sel && populated);
 	}
 
-	draw_status(p, W, H, s->status);
+	draw_status(wm, p, W, H, s->status);
 }
 
 /* ----- the keybinding editor --------------------------------------------- */
 
-static void draw_row(struct ncplane *p, int prow, int W, const char *label,
-		     const char *chord, bool selected, bool capturing)
+static void draw_row(WM *wm, struct ncplane *p, int prow, int W,
+		     const char *label, const char *chord, bool selected,
+		     bool capturing)
 {
 	if (selected) {
 		if (capturing) {
-			ncplane_set_fg_rgb8(p, 0x10, 0x10, 0x10);
-			ncplane_set_bg_rgb8(p, 0xe0, 0xa0, 0x30);
+			vp_setfg(p, wm->theme.panel_cap_fg);
+			vp_setbg(p, wm->theme.panel_cap_bg);
 		} else {
-			ncplane_set_fg_rgb8(p, 0xff, 0xff, 0xff);
-			ncplane_set_bg_rgb8(p, 0x20, 0x50, 0xa0);
+			vp_setfg(p, wm->theme.panel_sel_fg);
+			vp_setbg(p, wm->theme.panel_sel_bg);
 		}
 		for (int c = 1; c < W - 1; c++) {
 			ncplane_putchar_yx(p, prow, c, ' ');
 		}
 	} else {
-		ncplane_set_fg_rgb8(p, 0xd0, 0xd0, 0xd8);
-		ncplane_set_bg_rgb8(p, 0x1c, 0x1c, 0x28);
+		vp_setfg(p, wm->theme.panel_fg);
+		vp_setbg(p, wm->theme.panel_bg);
 	}
 
 	const char *shown = capturing ? "‹press a key…›" : chord;
@@ -1037,8 +1466,7 @@ static void draw_row(struct ncplane *p, int prow, int W, const char *label,
 	ncplane_putstr_yx(p, prow, 2, lbuf);
 
 	if (!selected) {
-		ncplane_set_fg_rgb8(p, 0x90, 0xb0,
-				    0xe0); /* dim accent for the chord */
+		vp_setfg(p, wm->theme.panel_accent); /* dim accent for the chord */
 	}
 	ncplane_putstr_yx(p, prow, chord_x, shown);
 }
@@ -1050,7 +1478,7 @@ static void draw_keybindings(WM *wm, struct ncplane *p, int W, int H)
 
 	clamp_scroll(wm);
 	ncplane_erase(p);
-	draw_border(p, W, H, " Keybindings ");
+	draw_border(wm, p, W, H, " Keybindings ");
 
 	for (int i = 0; i < v; i++) {
 		int row = s->scroll + i;
@@ -1069,18 +1497,18 @@ static void draw_keybindings(WM *wm, struct ncplane *p, int W, int H)
 			keymap_chord_for_action(&wm->config, act, chord,
 						sizeof(chord));
 		}
-		draw_row(p, 1 + i, W, label, chord, row == s->sel,
+		draw_row(wm, p, 1 + i, W, label, chord, row == s->sel,
 			 s->capturing && row == s->sel);
 	}
 
 	/* Status + hint lines. */
-	ncplane_set_bg_rgb8(p, 0x1c, 0x1c, 0x28);
-	ncplane_set_fg_rgb8(p, 0xc0, 0xc0, 0x80);
+	vp_setbg(p, wm->theme.panel_bg);
+	vp_setfg(p, wm->theme.panel_status);
 	char sbuf[128];
 	snprintf(sbuf, sizeof(sbuf), "%-*.*s", W - 4, W - 4, s->status);
 	ncplane_putstr_yx(p, H - 3, 2, sbuf);
 
-	ncplane_set_fg_rgb8(p, 0x80, 0x80, 0x90);
+	vp_setfg(p, wm->theme.panel_hint);
 	char hbuf[128];
 	snprintf(hbuf, sizeof(hbuf), "%-*.*s", W - 4, W - 4,
 		 "↑/↓ select · Enter rebind · D unbind · S save · Esc back");
@@ -1093,7 +1521,7 @@ static void draw_terminal(WM *wm, struct ncplane *p, int W, int H)
 {
 	Settings *s = &wm->settings;
 	ncplane_erase(p);
-	draw_border(p, W, H, " Terminal ");
+	draw_border(wm, p, W, H, " Terminal ");
 
 	for (int i = 0; i < TERM_ROWS; i++) {
 		const term_row *tr = &g_term_rows[i];
@@ -1104,20 +1532,117 @@ static void draw_terminal(WM *wm, struct ncplane *p, int W, int H)
 		} else {
 			snprintf(val, sizeof(val), "%d", v);
 		}
-		draw_row(p, 1 + i, W, tr->label, val, i == s->sel, false);
+		draw_row(wm, p, 1 + i, W, tr->label, val, i == s->sel, false);
 	}
 
 	/* Status + hint lines (mirrors the keybinding editor's footer). */
-	ncplane_set_bg_rgb8(p, 0x1c, 0x1c, 0x28);
-	ncplane_set_fg_rgb8(p, 0xc0, 0xc0, 0x80);
+	vp_setbg(p, wm->theme.panel_bg);
+	vp_setfg(p, wm->theme.panel_status);
 	char sbuf[128];
 	snprintf(sbuf, sizeof(sbuf), "%-*.*s", W - 4, W - 4, s->status);
 	ncplane_putstr_yx(p, H - 3, 2, sbuf);
 
-	ncplane_set_fg_rgb8(p, 0x80, 0x80, 0x90);
+	vp_setfg(p, wm->theme.panel_hint);
 	char hbuf[128];
 	snprintf(hbuf, sizeof(hbuf), "%-*.*s", W - 4, W - 4,
 		 "↑/↓ select · ←/→ adjust · S save · Esc back");
+	ncplane_putstr_yx(p, H - 2, 2, hbuf);
+}
+
+/* ----- the Appearance view ----------------------------------------------- */
+
+/* Fill label/value for Appearance row `row`. */
+static void appearance_row_text(WM *wm, int row, char *label, size_t llen,
+				char *val, size_t vlen)
+{
+	switch (row) {
+	case APP_ROW_THEME:
+		snprintf(label, llen, "Theme");
+		snprintf(val, vlen, "%s",
+			 wm->config.theme_name ? wm->config.theme_name :
+						 vp_theme_default()->name);
+		return;
+	case APP_ROW_BG:
+		snprintf(label, llen, "Background");
+		snprintf(val, vlen, "%s%s", bg_mode_name(wm->theme.bg_mode),
+			 wm->config.bg_mode < 0 ? " (theme)" : "");
+		return;
+	case APP_ROW_FIT:
+		snprintf(label, llen, "Image fit");
+		snprintf(val, vlen, "%s", bg_fit_name(wm->theme.bg_fit));
+		return;
+	case APP_ROW_IMAGE:
+		snprintf(label, llen, "Image path");
+		if (wm->config.bg_image_path) {
+			snprintf(val, vlen, "%s", wm->config.bg_image_path);
+		} else {
+			snprintf(val, vlen, "(none)");
+		}
+		return;
+	case APP_ROW_KEEP:
+		snprintf(label, llen, "Keep tweaks on theme switch");
+		snprintf(val, vlen, "%s",
+			 wm->config.keep_customizations ? "yes" : "no");
+		return;
+	default: {
+		int idx = row - APP_FIXED_ROWS;
+		snprintf(label, llen, "%s", vp_theme_field_name(idx));
+		snprintf(val, vlen, "%06x%s", vp_theme_field_get(&wm->theme, idx),
+			 config_has_color_override(&wm->config, idx, NULL) ? " *" :
+									    "");
+		return;
+	}
+	}
+}
+
+static void draw_appearance(WM *wm, struct ncplane *p, int W, int H)
+{
+	Settings *s = &wm->settings;
+	int v = viewport_rows(wm);
+
+	clamp_scroll_n(wm, app_total_rows());
+	ncplane_erase(p);
+	draw_border(wm, p, W, H, " Appearance ");
+
+	for (int i = 0; i < v; i++) {
+		int row = s->scroll + i;
+		if (row >= app_total_rows()) {
+			break;
+		}
+		char label[64], val[160];
+		appearance_row_text(wm, row, label, sizeof(label), val,
+				    sizeof(val));
+
+		/* Show the live edit buffer (with a cursor) on the row being typed. */
+		bool editing_this =
+			s->editing &&
+			((s->edit_kind == 0 && row == APP_ROW_IMAGE) ||
+			 (s->edit_kind == 1 &&
+			  row == APP_FIXED_ROWS + s->edit_color_idx));
+		if (editing_this) {
+			/* Show the live edit buffer with a cursor. capturing=false so
+			 * draw_row prints our text instead of the "press a key" prompt
+			 * (that prompt is only for the keybinding editor). */
+			char buf[sizeof(s->input) + 2];
+			snprintf(buf, sizeof(buf), "%s_", s->input);
+			draw_row(wm, p, 1 + i, W, label, buf, true, false);
+		} else {
+			draw_row(wm, p, 1 + i, W, label, val, row == s->sel,
+				 false);
+		}
+	}
+
+	/* Status + hint lines (mirrors the other editors' footer). */
+	vp_setbg(p, wm->theme.panel_bg);
+	vp_setfg(p, wm->theme.panel_status);
+	char sbuf[160];
+	snprintf(sbuf, sizeof(sbuf), "%-*.*s", W - 4, W - 4, s->status);
+	ncplane_putstr_yx(p, H - 3, 2, sbuf);
+
+	vp_setfg(p, wm->theme.panel_hint);
+	char hbuf[160];
+	snprintf(hbuf, sizeof(hbuf), "%-*.*s", W - 4, W - 4,
+		 "↑/↓ select · ←/→ change · Enter edit · D reset · S save · Esc back");
 	ncplane_putstr_yx(p, H - 2, 2, hbuf);
 }
 
@@ -1141,6 +1666,8 @@ bool settings_render(WM *wm)
 		draw_grid(wm, p, W, H);
 	} else if (s->view == SETTINGS_VIEW_TERMINAL) {
 		draw_terminal(wm, p, W, H);
+	} else if (s->view == SETTINGS_VIEW_APPEARANCE) {
+		draw_appearance(wm, p, W, H);
 	} else {
 		draw_keybindings(wm, p, W, H);
 	}

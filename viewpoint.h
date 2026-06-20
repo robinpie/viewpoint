@@ -86,6 +86,93 @@ typedef enum {
 void vp_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 /* ------------------------------------------------------------------------- */
+/* Theme                                                                     */
+/* ------------------------------------------------------------------------- */
+
+/* A packed 0xRRGGBB color. vp_setfg/vp_setbg unpack and apply it to a plane. */
+typedef uint32_t vp_rgb;
+
+/* Desktop background style. SOLID fills with a single base glyph; PATTERN tiles
+ * a (possibly multi-cell) glyph string across the desktop; IMAGE blits a decoded
+ * image file as a pixel bitmap (needs WM.pixel_ok, else it falls back to SOLID). */
+typedef enum {
+	BG_SOLID = 0,
+	BG_PATTERN,
+	BG_IMAGE,
+} vp_bg_mode;
+
+/* How a background IMAGE is mapped onto the desktop. */
+typedef enum {
+	FIT_STRETCH = 0, /* stretch to fill (aspect may distort) */
+	FIT_SCALE, /* scale to fit, keep aspect (letterboxed) */
+	FIT_CENTER, /* native size, centered (crop/border) */
+	FIT_TILE, /* native size, tiled across the desktop */
+} vp_bg_fit;
+
+/* A full color palette + desktop-background spec. The active theme is a value
+ * copy on the WM (WM.theme): a chosen preset, then any per-color/background
+ * overrides from the config laid on top. Every chrome color reads from here, so
+ * there are no hardcoded RGBs left in the drawing code. See theme.c. */
+typedef struct VpTheme {
+	const char *name; /* stable id used in the config ("theme = <name>") */
+
+	/* Window frame chrome. */
+	vp_rgb win_focus_fg, win_focus_bg;
+	vp_rgb win_unfocus_fg, win_unfocus_bg;
+
+	/* Taskbar. */
+	vp_rgb bar_fg, bar_bg; /* base cell */
+	vp_rgb bar_focus_fg, bar_focus_bg; /* focused window slot */
+	vp_rgb bar_min_fg, bar_min_bg; /* minimized window slot */
+	vp_rgb bar_slot_fg, bar_slot_bg; /* normal window slot */
+	vp_rgb bar_arrow_bg; /* scroll-arrow background */
+	vp_rgb bar_mode_fg; /* mode-pill text */
+	vp_rgb bar_pass_bg; /* passthrough pill */
+	vp_rgb bar_interp_bg; /* interpret pill */
+
+	/* Settings panel. */
+	vp_rgb panel_fg, panel_bg; /* body */
+	vp_rgb panel_sel_fg, panel_sel_bg; /* selected row / tile */
+	vp_rgb panel_cap_fg, panel_cap_bg; /* row capturing a chord */
+	vp_rgb panel_accent; /* borders, tile accents, chord text */
+	vp_rgb panel_status; /* status line */
+	vp_rgb panel_hint; /* hint line / dim text */
+
+	/* Desktop launcher icons. */
+	vp_rgb icon_fg, icon_bg, icon_border, icon_glyph; /* Settings tile */
+	vp_rgb exit_fg, exit_bg, exit_border, exit_glyph; /* Exit tile */
+
+	/* Software mouse cursor (console) + snap-preview outline. */
+	vp_rgb cursor_fg, cursor_bg;
+	vp_rgb snap_outline;
+
+	/* Desktop background. */
+	vp_rgb bg_fg, bg_bg; /* glyph colors (SOLID/PATTERN, and IMAGE letterbox) */
+	vp_bg_mode bg_mode;
+	vp_bg_fit bg_fit;
+	const char *bg_glyph; /* base glyph (SOLID) / repeating cell(s) (PATTERN) */
+} VpTheme;
+
+/* Apply a packed color to a plane's pen. */
+void vp_setfg(struct ncplane *p, vp_rgb c);
+void vp_setbg(struct ncplane *p, vp_rgb c);
+
+/* Built-in presets. *_builtin returns NULL for an unknown name. */
+const VpTheme *vp_theme_builtin(const char *name);
+const VpTheme *vp_theme_default(void);
+int vp_theme_count(void);
+const VpTheme *vp_theme_by_index(int i);
+
+/* Per-color override table: a stable mapping of element names (as used in the
+ * config's "color = <name> <hex>" lines and the Appearance editor) to the
+ * VpTheme color field they set. */
+int vp_theme_field_count(void);
+const char *vp_theme_field_name(int idx); /* NULL if out of range */
+int vp_theme_field_index(const char *name); /* -1 if unknown */
+vp_rgb vp_theme_field_get(const VpTheme *t, int idx);
+void vp_theme_field_set(VpTheme *t, int idx, vp_rgb c);
+
+/* ------------------------------------------------------------------------- */
 /* Config                                                                    */
 /* ------------------------------------------------------------------------- */
 
@@ -159,11 +246,37 @@ typedef struct VpConfig {
 	int settings_icon_y, settings_icon_x;
 	int exit_icon_y, exit_icon_x;
 
+	/* Theming. theme_name is the chosen preset (NULL = the default preset).
+	 * The background fields override the preset's desktop background when set:
+	 * bg_mode is a vp_bg_mode or -1 ("use the theme's"); bg_fit is a vp_bg_fit;
+	 * bg_glyph / bg_image_path are heap strings or NULL. Per-color overrides are
+	 * laid on top of the preset (see VpColorOverride). */
+	char *theme_name;
+	int bg_mode; /* vp_bg_mode, or -1 = inherit from the preset */
+	int bg_fit; /* vp_bg_fit (only meaningful for BG_IMAGE) */
+	char *bg_glyph; /* SOLID/PATTERN glyph override, or NULL */
+	char *bg_image_path; /* BG_IMAGE source file, or NULL */
+
+	/* When true, switching the theme preset in-app keeps the per-color and
+	 * background overrides layered on top; when false (default), a theme switch
+	 * discards them so the new preset applies in full. */
+	bool keep_customizations;
+
+	struct VpColorOverride *color_overrides; /* malloc'd list, or NULL */
+	int n_color_overrides, color_cap;
+
 	/* Verbatim text of the file's hand-written "manual" section, captured at
      * load. config_save() preserves it untouched and only rewrites the
      * app-managed section below it. NULL if there was none. */
 	char *manual_text;
 } VpConfig;
+
+/* One per-color override: a VpTheme color-field index (see vp_theme_field_*) and
+ * the color to force it to, on top of whatever preset is active. */
+typedef struct VpColorOverride {
+	int field_idx;
+	vp_rgb color;
+} VpColorOverride;
 
 /* Scalar (single-value) settings the in-app panels can change and the manual
  * config section may therefore shadow. To make a new in-app setting honor the
@@ -173,6 +286,10 @@ typedef enum {
 	SETTING_TOGGLE_KEY,
 	SETTING_SCROLLBACK,
 	SETTING_SCROLL_STEP,
+	SETTING_THEME,
+	SETTING_BACKGROUND,
+	SETTING_COLORS,
+	SETTING_KEEP_CUSTOM,
 } vp_setting;
 
 /* ------------------------------------------------------------------------- */
@@ -309,6 +426,7 @@ typedef enum {
 	SETTINGS_VIEW_GRID = 0, /* Control-Panel tile grid (landing page) */
 	SETTINGS_VIEW_KEYBINDINGS,
 	SETTINGS_VIEW_TERMINAL, /* scrollback size / scroll step */
+	SETTINGS_VIEW_APPEARANCE, /* theme, desktop background, color overrides */
 } settings_view;
 
 /* In-app settings. A modal panel opened from a desktop launcher icon; while open
@@ -325,6 +443,15 @@ typedef struct Settings {
 	struct ncplane *icon; /* desktop launcher (low z, above the background) */
 	struct ncplane *panel; /* the modal panel (created on open) */
 	char status[128]; /* transient status/hint line */
+
+	/* In-app text entry (Appearance view): while `editing`, keystrokes build up
+	 * `input`. edit_kind selects what a commit sets - the background image path
+	 * or a color override (edit_color_idx names the VpTheme field). */
+	bool editing;
+	char input[256];
+	int input_len;
+	int edit_kind; /* 0 = image path, 1 = color hex */
+	int edit_color_idx; /* VpTheme color-field index when edit_kind == 1 */
 } Settings;
 
 typedef struct WM {
@@ -407,6 +534,15 @@ typedef struct WM {
 
 	VpConfig config;
 	Settings settings;
+
+	/* Active theme (a value copy: preset + config overrides), and the desktop
+	 * background. For BG_IMAGE, bg_visual holds the decoded image (retained so it
+	 * re-blits cheaply on resize/theme change) and bg_planes are its pixel-bitmap
+	 * plane(s) - one for stretch/scale/center, several for a tiled background. */
+	VpTheme theme;
+	struct ncvisual *bg_visual;
+	struct ncplane **bg_planes;
+	int bg_nplanes;
 } WM;
 
 /* ------------------------------------------------------------------------- */
@@ -440,6 +576,18 @@ bool config_save(const VpConfig *cfg);
 bool config_manual_shadows_setting(const VpConfig *live, vp_setting setting);
 bool config_manual_shadows_action(const VpConfig *live, vp_action act,
 				  uint32_t id, unsigned mods);
+
+/* Drop the manual-section line(s) that would shadow an in-app change to this
+ * setting, so the in-app value wins on the next load. Used by the Appearance
+ * menu to make theme/background/color changes authoritative. */
+void config_manual_override(VpConfig *cfg, vp_setting setting);
+void config_manual_override_color(VpConfig *cfg, int field_idx);
+
+/* Per-color override list maintenance (used by the Appearance editor). The
+ * field index is a vp_theme_field_* index. */
+bool config_set_color_override(VpConfig *cfg, int idx, vp_rgb color);
+void config_clear_color_override(VpConfig *cfg, int idx);
+bool config_has_color_override(const VpConfig *cfg, int idx, vp_rgb *out);
 
 /* ------------------------------------------------------------------------- */
 /* pty.c                                                                     */
@@ -569,6 +717,22 @@ void wm_clamp_onscreen(WM *wm, Window *win);
 void wm_handle_resize(WM *wm);
 void wm_render(WM *wm);
 
+/* Resolve the config's theme + overrides into wm->theme and apply it live:
+ * recolor the persistent base planes (taskbar, cursor), repaint the desktop
+ * background, and mark all chrome dirty. Safe to call before the taskbar/icons
+ * exist (seeds the theme at startup) and on every later theme change. */
+void theme_apply(WM *wm);
+
+/* (Re)paint the desktop background for the current theme: SOLID/PATTERN drive
+ * the std plane's base cell (+ a one-shot pattern paint); IMAGE blits the
+ * decoded file as pixel bitmap plane(s) below every window. Called from
+ * theme_apply, wm_init and wm_handle_resize. */
+void background_apply(WM *wm);
+
+/* Destroy the background image plane(s) and retained visual (teardown / before
+ * re-applying an image background). */
+void background_free(WM *wm);
+
 /* Record the latest pointer position; the software cursor (console only)
  * follows it on the next render. Called from the mouse input path. */
 void wm_set_mouse_pos(WM *wm, int y, int x);
@@ -627,6 +791,10 @@ void keymap_unbind_action(VpConfig *cfg, vp_action act);
 
 /* Create the desktop launcher icon (kept just above the background). */
 void settings_init(WM *wm);
+/* Repaint the Settings / Exit launcher icons with the current theme colors
+ * (their planes persist, so a theme change repaints them in place). */
+void settings_icon_redraw(WM *wm);
+void exit_icon_redraw(WM *wm);
 /* Re-clamp the launcher icon onto the screen after a resize (and honor a
  * user-dragged position stored in the config). */
 void settings_icon_reflow(WM *wm);

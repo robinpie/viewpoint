@@ -45,11 +45,10 @@ void wm_init(WM *wm, struct notcurses *nc)
 	config_load(&wm->config);
 	notcurses_stddim_yx(nc, &wm->scr_rows, &wm->scr_cols);
 
-	/* Desktop background: a dim field so floating windows stand out. */
-	uint64_t ch = 0;
-	ncchannels_set_fg_rgb8(&ch, 0x40, 0x44, 0x4c);
-	ncchannels_set_bg_rgb8(&ch, 0x10, 0x12, 0x16);
-	ncplane_set_base(wm->std, "·", 0, ch);
+	/* Resolve the configured theme into wm->theme and paint the desktop
+	 * background. Done before any chrome is created so everything reads the
+	 * active palette (the taskbar/cursor are recolored by their own creators). */
+	theme_apply(wm);
 
 	/* TERM=linux means the bare Linux console: we drive GPM ourselves (see
      * main.c) and must draw a software pointer, because gpm's own pointer is a
@@ -65,8 +64,11 @@ void wm_init(WM *wm, struct notcurses *nc)
 		wm->cursor = ncplane_create(wm->std, &o);
 		if (wm->cursor) {
 			uint64_t cc = 0;
-			ncchannels_set_fg_rgb8(&cc, 0xff, 0xff, 0xff);
-			ncchannels_set_bg_rgb8(&cc, 0x00, 0x00, 0x00);
+			vp_rgb cf = wm->theme.cursor_fg, cb = wm->theme.cursor_bg;
+			ncchannels_set_fg_rgb8(&cc, (cf >> 16) & 0xff,
+					       (cf >> 8) & 0xff, cf & 0xff);
+			ncchannels_set_bg_rgb8(&cc, (cb >> 16) & 0xff,
+					       (cb >> 8) & 0xff, cb & 0xff);
 			/* A solid block is unambiguous and always present in console fonts. */
 			ncplane_set_channels(wm->cursor, cc);
 			ncplane_putstr_yx(wm->cursor, 0, 0, "█");
@@ -81,6 +83,251 @@ void wm_set_mouse_pos(WM *wm, int y, int x)
 {
 	wm->mouse_y = y;
 	wm->mouse_x = x;
+}
+
+/* ----- theming + desktop background -------------------------------------- */
+
+/* Drop the background image plane(s). Keeps the retained visual unless `visual`
+ * is set (full teardown / forcing a re-decode). */
+static void bg_drop_planes(WM *wm, bool visual)
+{
+	for (int i = 0; i < wm->bg_nplanes; i++) {
+		if (wm->bg_planes[i]) {
+			ncplane_destroy(wm->bg_planes[i]);
+		}
+	}
+	free(wm->bg_planes);
+	wm->bg_planes = NULL;
+	wm->bg_nplanes = 0;
+	if (visual && wm->bg_visual) {
+		ncvisual_destroy(wm->bg_visual);
+		wm->bg_visual = NULL;
+	}
+}
+
+void background_free(WM *wm)
+{
+	bg_drop_planes(wm, true);
+}
+
+/* Track a freshly-blitted background plane and sink it below every window. */
+static bool bg_add_plane(WM *wm, struct ncplane *p)
+{
+	if (!p) {
+		return false;
+	}
+	struct ncplane **n = realloc(
+		wm->bg_planes, (size_t)(wm->bg_nplanes + 1) * sizeof(*n));
+	if (!n) {
+		ncplane_destroy(p);
+		return false;
+	}
+	wm->bg_planes = n;
+	wm->bg_planes[wm->bg_nplanes++] = p;
+	ncplane_move_bottom(p); /* above the std base cell, below all windows */
+	return true;
+}
+
+static struct ncplane *bg_blit(WM *wm, int y, int x, ncscale_e scale)
+{
+	struct ncvisual_options o = { 0 };
+	o.n = wm->std;
+	o.y = y;
+	o.x = x;
+	o.scaling = scale;
+	o.blitter = NCBLIT_PIXEL;
+	o.flags = NCVISUAL_OPTION_CHILDPLANE;
+	return ncvisual_blit(wm->nc, wm->bg_visual, &o);
+}
+
+/* Center a blitted plane within the desktop (crops if larger). */
+static void bg_center(WM *wm, struct ncplane *p)
+{
+	unsigned ph, pw;
+	ncplane_dim_yx(p, &ph, &pw);
+	int cy = ((int)wm->scr_rows - (int)ph) / 2;
+	int cx = ((int)wm->scr_cols - (int)pw) / 2;
+	ncplane_move_yx(p, cy, cx);
+}
+
+#define BG_TILE_MAX 256 /* cap pixel-bitmap planes for a tiled background */
+
+void background_apply(WM *wm)
+{
+	bg_drop_planes(wm, false); /* keep any retained visual for re-blit */
+
+	vp_bg_mode mode = wm->theme.bg_mode;
+
+	/* An image background needs pixel support and a loadable file; otherwise
+	 * fall back to a solid fill in the theme's background colors. */
+	if (mode == BG_IMAGE && !wm->pixel_ok) {
+		mode = BG_SOLID;
+	}
+	if (mode == BG_IMAGE) {
+		const char *path = wm->config.bg_image_path;
+		if (!path || !*path) {
+			mode = BG_SOLID;
+		} else {
+			if (!wm->bg_visual) {
+				wm->bg_visual = ncvisual_from_file(path);
+			}
+			if (!wm->bg_visual) {
+				vp_log("background: cannot load image %s\n",
+				       path);
+				mode = BG_SOLID;
+			}
+		}
+	}
+
+	/* Std base cell: the desktop glyph for SOLID, a blank in the background
+	 * color otherwise (so PATTERN gaps / IMAGE letterbox read as the theme bg). */
+	uint64_t ch = 0;
+	vp_rgb fg = wm->theme.bg_fg, bg = wm->theme.bg_bg;
+	ncchannels_set_fg_rgb8(&ch, (fg >> 16) & 0xff, (fg >> 8) & 0xff,
+			       fg & 0xff);
+	ncchannels_set_bg_rgb8(&ch, (bg >> 16) & 0xff, (bg >> 8) & 0xff,
+			       bg & 0xff);
+	const char *glyph = (wm->theme.bg_glyph && *wm->theme.bg_glyph) ?
+				    wm->theme.bg_glyph :
+				    " ";
+	ncplane_set_base(wm->std, mode == BG_SOLID ? glyph : " ", 0, ch);
+	ncplane_erase(wm->std); /* clear any glyphs a previous PATTERN painted */
+
+	if (mode == BG_PATTERN) {
+		vp_setfg(wm->std, wm->theme.bg_fg);
+		vp_setbg(wm->std, wm->theme.bg_bg);
+		for (int r = 0; r < (int)wm->scr_rows; r++) {
+			int c = 0;
+			while (c < (int)wm->scr_cols) {
+				int adv = ncplane_putstr_yx(wm->std, r, c, glyph);
+				if (adv <= 0) {
+					break;
+				}
+				c += adv;
+			}
+		}
+	} else if (mode == BG_IMAGE) {
+		switch (wm->theme.bg_fit) {
+		case FIT_STRETCH:
+			bg_add_plane(wm, bg_blit(wm, 0, 0, NCSCALE_STRETCH));
+			break;
+		case FIT_SCALE: {
+			struct ncplane *p = bg_blit(wm, 0, 0, NCSCALE_SCALE);
+			if (p) {
+				bg_center(wm, p);
+				bg_add_plane(wm, p);
+			}
+			break;
+		}
+		case FIT_CENTER: {
+			struct ncplane *p = bg_blit(wm, 0, 0, NCSCALE_NONE);
+			if (p) {
+				bg_center(wm, p);
+				bg_add_plane(wm, p);
+			}
+			break;
+		}
+		case FIT_TILE: {
+			struct ncplane *first = bg_blit(wm, 0, 0, NCSCALE_NONE);
+			if (first) {
+				unsigned th, tw;
+				ncplane_dim_yx(first, &th, &tw);
+				bg_add_plane(wm, first);
+				for (int y = 0;
+				     th > 0 && y < (int)wm->scr_rows &&
+				     wm->bg_nplanes < BG_TILE_MAX;
+				     y += (int)th) {
+					for (int x = 0;
+					     tw > 0 && x < (int)wm->scr_cols &&
+					     wm->bg_nplanes < BG_TILE_MAX;
+					     x += (int)tw) {
+						if (y == 0 && x == 0) {
+							continue;
+						}
+						bg_add_plane(wm,
+							     bg_blit(wm, y, x,
+								     NCSCALE_NONE));
+					}
+				}
+			}
+			break;
+		}
+		}
+	}
+
+	wm->needs_render = true;
+}
+
+void theme_apply(WM *wm)
+{
+	/* Resolve preset, then lay config overrides on top. */
+	const VpTheme *preset = vp_theme_builtin(wm->config.theme_name);
+	wm->theme = preset ? *preset : *vp_theme_default();
+
+	if (wm->config.bg_mode >= 0) {
+		wm->theme.bg_mode = (vp_bg_mode)wm->config.bg_mode;
+	}
+	if (wm->config.bg_fit >= 0) {
+		wm->theme.bg_fit = (vp_bg_fit)wm->config.bg_fit;
+	}
+	if (wm->config.bg_glyph) {
+		wm->theme.bg_glyph = wm->config.bg_glyph;
+	}
+	for (int i = 0; i < wm->config.n_color_overrides; i++) {
+		vp_theme_field_set(&wm->theme,
+				   wm->config.color_overrides[i].field_idx,
+				   wm->config.color_overrides[i].color);
+	}
+
+	/* Recolor the persistent base planes that aren't redrawn per frame. */
+	if (wm->taskbar) {
+		uint64_t ch = 0;
+		vp_rgb f = wm->theme.bar_fg, b = wm->theme.bar_bg;
+		ncchannels_set_fg_rgb8(&ch, (f >> 16) & 0xff, (f >> 8) & 0xff,
+				       f & 0xff);
+		ncchannels_set_bg_rgb8(&ch, (b >> 16) & 0xff, (b >> 8) & 0xff,
+				       b & 0xff);
+		ncplane_set_base(wm->taskbar, " ", 0, ch);
+	}
+	if (wm->cursor) {
+		uint64_t cc = 0;
+		vp_rgb cf = wm->theme.cursor_fg, cb = wm->theme.cursor_bg;
+		ncchannels_set_fg_rgb8(&cc, (cf >> 16) & 0xff, (cf >> 8) & 0xff,
+				       cf & 0xff);
+		ncchannels_set_bg_rgb8(&cc, (cb >> 16) & 0xff, (cb >> 8) & 0xff,
+				       cb & 0xff);
+		ncplane_set_channels(wm->cursor, cc);
+		ncplane_putstr_yx(wm->cursor, 0, 0, "█");
+	}
+	if (wm->settings.panel) {
+		uint64_t base = 0;
+		vp_rgb pf = wm->theme.panel_fg, pb = wm->theme.panel_bg;
+		ncchannels_set_fg_rgb8(&base, (pf >> 16) & 0xff,
+				       (pf >> 8) & 0xff, pf & 0xff);
+		ncchannels_set_bg_rgb8(&base, (pb >> 16) & 0xff,
+				       (pb >> 8) & 0xff, pb & 0xff);
+		ncplane_set_base(wm->settings.panel, " ", 0, base);
+	}
+	settings_icon_redraw(wm);
+	exit_icon_redraw(wm);
+
+	/* Force a re-decode of any image background (palette/path may have changed),
+	 * then repaint the desktop. */
+	if (wm->bg_visual) {
+		ncvisual_destroy(wm->bg_visual);
+		wm->bg_visual = NULL;
+	}
+	background_apply(wm);
+
+	for (int i = 0; i < wm->nwins; i++) {
+		wm->wins[i]->frame_dirty = true;
+		wm->wins[i]->dirty = true;
+	}
+	wm->taskbar_dirty = true;
+	if (wm->settings.open) {
+		wm->settings.dirty = true;
+	}
+	wm->needs_render = true;
 }
 
 bool wm_add_window(WM *wm, Window *win)
@@ -370,6 +617,7 @@ void wm_handle_resize(WM *wm)
 	if (wm->taskbar) {
 		taskbar_reflow(wm);
 	}
+	background_apply(wm); /* re-blit/repaint the desktop for the new size */
 	settings_icon_reflow(wm); /* keep the launcher icon on-screen */
 	exit_icon_reflow(wm); /* re-anchor to the new bottom-right corner */
 	for (int i = 0; i < wm->nwins; i++) {

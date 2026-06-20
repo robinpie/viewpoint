@@ -35,12 +35,6 @@
 #include <limits.h>
 #include <time.h>
 
-/* Border/title-bar colors. */
-#define COL_FOCUS_FG 0xff, 0xff, 0xff
-#define COL_FOCUS_BG 0x20, 0x40, 0x80
-#define COL_UNFOCUS_FG 0xc0, 0xc0, 0xc0
-#define COL_UNFOCUS_BG 0x30, 0x30, 0x30
-
 static void clampgeo(int *w, int *h)
 {
 	if (*w < VP_MIN_W)
@@ -321,11 +315,11 @@ void window_draw_frame(WM *wm, Window *win)
 	int h = win->h;
 
 	if (focused) {
-		ncplane_set_fg_rgb8(f, COL_FOCUS_FG);
-		ncplane_set_bg_rgb8(f, COL_FOCUS_BG);
+		vp_setfg(f, wm->theme.win_focus_fg);
+		vp_setbg(f, wm->theme.win_focus_bg);
 	} else {
-		ncplane_set_fg_rgb8(f, COL_UNFOCUS_FG);
-		ncplane_set_bg_rgb8(f, COL_UNFOCUS_BG);
+		vp_setfg(f, wm->theme.win_unfocus_fg);
+		vp_setbg(f, wm->theme.win_unfocus_bg);
 	}
 	ncplane_set_styles(f, NCSTYLE_NONE);
 

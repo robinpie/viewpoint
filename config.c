@@ -88,6 +88,75 @@ static bool is_marker(const char *line, const char *marker)
 	return strncmp(line, marker, strlen(marker)) == 0;
 }
 
+/* Parse a 6-digit hex color ("204080" or "#204080") into *out. */
+static bool parse_hex_color(const char *s, vp_rgb *out)
+{
+	if (*s == '#') {
+		s++;
+	}
+	char *end = NULL;
+	unsigned long v = strtoul(s, &end, 16);
+	if (end == s || *trim(end) != '\0' || v > 0xffffffUL) {
+		return false;
+	}
+	*out = (vp_rgb)v;
+	return true;
+}
+
+/* Set (or replace) the per-color override for field `idx` in cfg. */
+static bool set_color_override(VpConfig *cfg, int idx, vp_rgb color)
+{
+	for (int i = 0; i < cfg->n_color_overrides; i++) {
+		if (cfg->color_overrides[i].field_idx == idx) {
+			cfg->color_overrides[i].color = color;
+			return true;
+		}
+	}
+	if (cfg->n_color_overrides == cfg->color_cap) {
+		int nc = cfg->color_cap ? cfg->color_cap * 2 : 8;
+		VpColorOverride *n = realloc(cfg->color_overrides,
+					    (size_t)nc * sizeof(*n));
+		if (!n) {
+			return false;
+		}
+		cfg->color_overrides = n;
+		cfg->color_cap = nc;
+	}
+	cfg->color_overrides[cfg->n_color_overrides].field_idx = idx;
+	cfg->color_overrides[cfg->n_color_overrides].color = color;
+	cfg->n_color_overrides++;
+	return true;
+}
+
+bool config_set_color_override(VpConfig *cfg, int idx, vp_rgb color)
+{
+	return set_color_override(cfg, idx, color);
+}
+
+void config_clear_color_override(VpConfig *cfg, int idx)
+{
+	for (int i = 0; i < cfg->n_color_overrides; i++) {
+		if (cfg->color_overrides[i].field_idx == idx) {
+			cfg->color_overrides[i] =
+				cfg->color_overrides[--cfg->n_color_overrides];
+			return;
+		}
+	}
+}
+
+bool config_has_color_override(const VpConfig *cfg, int idx, vp_rgb *out)
+{
+	for (int i = 0; i < cfg->n_color_overrides; i++) {
+		if (cfg->color_overrides[i].field_idx == idx) {
+			if (out) {
+				*out = cfg->color_overrides[i].color;
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
 /* Apply one parsed key/value pair to cfg. Returns false for unknown keys or
  * malformed values. line is supplied only for diagnostics. */
 static bool config_apply(VpConfig *cfg, const char *key, char *val, int line)
@@ -158,6 +227,104 @@ static bool config_apply(VpConfig *cfg, const char *key, char *val, int line)
 			return false;
 		}
 		return true;
+	}
+	if (strcmp(key, "theme") == 0) {
+		if (!vp_theme_builtin(val)) {
+			vp_log("config: line %d: unknown theme '%s'\n", line,
+			       val);
+			return false;
+		}
+		free(cfg->theme_name);
+		cfg->theme_name = strdup(val);
+		return true;
+	}
+	if (strcmp(key, "background") == 0) {
+		/* "solid" | "pattern <glyph>" | "image <path>" */
+		char *sp = val;
+		while (*sp && !isspace((unsigned char)*sp)) {
+			sp++;
+		}
+		char *arg = NULL;
+		if (*sp) {
+			*sp = '\0';
+			arg = trim(sp + 1);
+		}
+		if (strcmp(val, "solid") == 0) {
+			cfg->bg_mode = BG_SOLID;
+		} else if (strcmp(val, "pattern") == 0) {
+			cfg->bg_mode = BG_PATTERN;
+			if (arg && *arg) {
+				free(cfg->bg_glyph);
+				cfg->bg_glyph = strdup(arg);
+			}
+		} else if (strcmp(val, "image") == 0) {
+			if (!arg || !*arg) {
+				vp_log("config: line %d: background image needs a path\n",
+				       line);
+				return false;
+			}
+			cfg->bg_mode = BG_IMAGE;
+			free(cfg->bg_image_path);
+			cfg->bg_image_path = strdup(arg);
+		} else {
+			vp_log("config: line %d: background needs solid|pattern|image\n",
+			       line);
+			return false;
+		}
+		return true;
+	}
+	if (strcmp(key, "bg_fit") == 0) {
+		if (strcmp(val, "stretch") == 0) {
+			cfg->bg_fit = FIT_STRETCH;
+		} else if (strcmp(val, "scale") == 0) {
+			cfg->bg_fit = FIT_SCALE;
+		} else if (strcmp(val, "center") == 0) {
+			cfg->bg_fit = FIT_CENTER;
+		} else if (strcmp(val, "tile") == 0) {
+			cfg->bg_fit = FIT_TILE;
+		} else {
+			vp_log("config: line %d: bg_fit needs stretch|scale|center|tile\n",
+			       line);
+			return false;
+		}
+		return true;
+	}
+	if (strcmp(key, "keep_customizations") == 0) {
+		if (strcmp(val, "true") == 0 || strcmp(val, "1") == 0 ||
+		    strcmp(val, "yes") == 0) {
+			cfg->keep_customizations = true;
+		} else if (strcmp(val, "false") == 0 || strcmp(val, "0") == 0 ||
+			   strcmp(val, "no") == 0) {
+			cfg->keep_customizations = false;
+		} else {
+			vp_log("config: line %d: keep_customizations needs true/false\n",
+			       line);
+			return false;
+		}
+		return true;
+	}
+	if (strcmp(key, "color") == 0) {
+		/* "<element> <hex>" */
+		char name[32];
+		char hex[16];
+		if (sscanf(val, "%31s %15s", name, hex) != 2) {
+			vp_log("config: line %d: color needs '<element> <hex>'\n",
+			       line);
+			return false;
+		}
+		int idx = vp_theme_field_index(name);
+		if (idx < 0) {
+			vp_log("config: line %d: unknown color element '%s'\n",
+			       line, name);
+			return false;
+		}
+		vp_rgb c;
+		if (!parse_hex_color(hex, &c)) {
+			vp_log("config: line %d: bad color hex '%s'\n", line,
+			       hex);
+			return false;
+		}
+		return set_color_override(cfg, idx, c);
 	}
 	vp_log("config: line %d: unknown key '%s'\n", line, key);
 	return false;
@@ -238,6 +405,16 @@ void config_defaults(VpConfig *cfg)
 	cfg->exit_icon_y = cfg->exit_icon_x = -1;
 	cfg->scrollback_max = VP_SCROLLBACK_MAX;
 	cfg->scroll_step = VP_SCROLL_STEP;
+	/* Theming: no preset chosen (use the built-in default) and no background
+	 * override (inherit the preset's). bg_fit only matters for image backgrounds. */
+	cfg->theme_name = NULL;
+	cfg->bg_mode = -1;
+	cfg->bg_fit = FIT_STRETCH;
+	cfg->bg_glyph = NULL;
+	cfg->bg_image_path = NULL;
+	cfg->keep_customizations = false;
+	cfg->color_overrides = NULL;
+	cfg->n_color_overrides = cfg->color_cap = 0;
 }
 
 void config_free(VpConfig *cfg)
@@ -248,6 +425,15 @@ void config_free(VpConfig *cfg)
 	cfg->keycap = 0;
 	free(cfg->manual_text);
 	cfg->manual_text = NULL;
+	free(cfg->theme_name);
+	cfg->theme_name = NULL;
+	free(cfg->bg_glyph);
+	cfg->bg_glyph = NULL;
+	free(cfg->bg_image_path);
+	cfg->bg_image_path = NULL;
+	free(cfg->color_overrides);
+	cfg->color_overrides = NULL;
+	cfg->n_color_overrides = cfg->color_cap = 0;
 }
 
 /* Create each directory along `path` (which names a file). Like `mkdir -p` on
@@ -281,6 +467,8 @@ static int chord_action(const VpConfig *cfg, uint32_t id, unsigned mods)
 	return -1;
 }
 
+static bool setting_differs(const VpConfig *a, const VpConfig *b, vp_setting s);
+
 /* Write the lines that turn `base` (= defaults + manual section) into the live
  * keymap `cfg`. This is a minimal chord-level diff so the in-app section stays
  * small and only conflicting manual settings are overridden (by later-wins). */
@@ -313,6 +501,56 @@ static void write_inapp_diff(FILE *f, const VpConfig *cfg, const VpConfig *base)
 				      cfg->exit_icon_x != base->exit_icon_x)) {
 		fprintf(f, "icon = exit %d %d\n", cfg->exit_icon_x,
 			cfg->exit_icon_y);
+	}
+
+	if (cfg->keep_customizations != base->keep_customizations) {
+		fprintf(f, "keep_customizations = %s\n",
+			cfg->keep_customizations ? "true" : "false");
+	}
+
+	/* Theme preset, when chosen and differing from the baseline. */
+	if (cfg->theme_name &&
+	    (!base->theme_name ||
+	     strcmp(cfg->theme_name, base->theme_name) != 0)) {
+		fprintf(f, "theme = %s\n", cfg->theme_name);
+	}
+
+	/* Desktop background override, when set and differing from the baseline. */
+	if (cfg->bg_mode >= 0 && setting_differs(cfg, base, SETTING_BACKGROUND)) {
+		if (cfg->bg_mode == BG_SOLID) {
+			fprintf(f, "background = solid\n");
+		} else if (cfg->bg_mode == BG_PATTERN) {
+			fprintf(f, "background = pattern %s\n",
+				cfg->bg_glyph ? cfg->bg_glyph : "·");
+		} else if (cfg->bg_mode == BG_IMAGE) {
+			fprintf(f, "background = image %s\n",
+				cfg->bg_image_path ? cfg->bg_image_path : "");
+		}
+		if (cfg->bg_mode == BG_IMAGE) {
+			static const char *fits[] = { "stretch", "scale",
+						      "center", "tile" };
+			if (cfg->bg_fit >= 0 && cfg->bg_fit <= FIT_TILE) {
+				fprintf(f, "bg_fit = %s\n", fits[cfg->bg_fit]);
+			}
+		}
+	}
+
+	/* Per-color overrides not already present (identical) in the baseline. */
+	for (int i = 0; i < cfg->n_color_overrides; i++) {
+		int idx = cfg->color_overrides[i].field_idx;
+		vp_rgb c = cfg->color_overrides[i].color;
+		bool in_base = false;
+		for (int j = 0; j < base->n_color_overrides; j++) {
+			if (base->color_overrides[j].field_idx == idx &&
+			    base->color_overrides[j].color == c) {
+				in_base = true;
+				break;
+			}
+		}
+		if (!in_base) {
+			fprintf(f, "color = %s %06x\n", vp_theme_field_name(idx),
+				c);
+		}
 	}
 
 	/* Chords present in base but gone from the live keymap: unbind them. */
@@ -388,8 +626,153 @@ static bool setting_differs(const VpConfig *a, const VpConfig *b, vp_setting s)
 		return a->scrollback_max != b->scrollback_max;
 	case SETTING_SCROLL_STEP:
 		return a->scroll_step != b->scroll_step;
+	case SETTING_THEME:
+		return (a->theme_name == NULL) != (b->theme_name == NULL) ||
+		       (a->theme_name && b->theme_name &&
+			strcmp(a->theme_name, b->theme_name) != 0);
+	case SETTING_BACKGROUND: {
+		if (a->bg_mode != b->bg_mode || a->bg_fit != b->bg_fit) {
+			return true;
+		}
+		bool ag = a->bg_glyph != NULL, bg = b->bg_glyph != NULL;
+		if (ag != bg ||
+		    (ag && bg && strcmp(a->bg_glyph, b->bg_glyph) != 0)) {
+			return true;
+		}
+		bool ai = a->bg_image_path != NULL, bi = b->bg_image_path != NULL;
+		if (ai != bi ||
+		    (ai && bi &&
+		     strcmp(a->bg_image_path, b->bg_image_path) != 0)) {
+			return true;
+		}
+		return false;
+	}
+	case SETTING_KEEP_CUSTOM:
+		return a->keep_customizations != b->keep_customizations;
+	case SETTING_COLORS: {
+		if (a->n_color_overrides != b->n_color_overrides) {
+			return true;
+		}
+		/* Order-independent: every override in `a` must match one in `b`. */
+		for (int i = 0; i < a->n_color_overrides; i++) {
+			bool found = false;
+			for (int j = 0; j < b->n_color_overrides; j++) {
+				if (a->color_overrides[i].field_idx ==
+					    b->color_overrides[j].field_idx &&
+				    a->color_overrides[i].color ==
+					    b->color_overrides[j].color) {
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				return true;
+			}
+		}
+		return false;
+	}
 	}
 	return false;
+}
+
+/* Does this manual-section line assign `key`? If `elem` is non-NULL, also require
+ * the value's first token to equal it (for "color = <element> <hex>" lines). The
+ * line is matched read-only; a scratch copy is trimmed/split. */
+static bool line_sets_key(const char *line, const char *key, const char *elem)
+{
+	char buf[1024];
+	snprintf(buf, sizeof(buf), "%.*s", (int)sizeof(buf) - 1, line);
+	char *s = trim(buf);
+	if (*s == '#' || *s == '\0') {
+		return false;
+	}
+	char *eq = strchr(s, '=');
+	if (!eq) {
+		return false;
+	}
+	*eq = '\0';
+	if (strcmp(trim(s), key) != 0) {
+		return false;
+	}
+	if (elem) {
+		char *val = trim(eq + 1);
+		char *sp = val;
+		while (*sp && !isspace((unsigned char)*sp)) {
+			sp++;
+		}
+		*sp = '\0';
+		if (strcmp(val, elem) != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/* Remove every manual-section line that assigns `key` (optionally narrowed to a
+ * single color `elem`), so an in-app change to that setting is no longer shadowed
+ * on the next load. Returns true if anything was removed. */
+static bool manual_drop_key(VpConfig *cfg, const char *key, const char *elem)
+{
+	if (!cfg->manual_text) {
+		return false;
+	}
+	char *out = NULL;
+	size_t len = 0, cap = 0;
+	bool changed = false;
+	for (const char *p = cfg->manual_text; *p;) {
+		const char *nl = strchr(p, '\n');
+		size_t llen = nl ? (size_t)(nl - p) : strlen(p);
+		char line[1024];
+		size_t cpy = llen < sizeof(line) ? llen : sizeof(line) - 1;
+		memcpy(line, p, cpy);
+		line[cpy] = '\0';
+		if (line_sets_key(line, key, elem)) {
+			changed = true; /* drop it */
+		} else {
+			out = buf_append(out, &len, &cap, line);
+			out = buf_append(out, &len, &cap, "\n");
+		}
+		if (!nl) {
+			break;
+		}
+		p = nl + 1;
+	}
+	if (changed) {
+		free(cfg->manual_text);
+		cfg->manual_text = out; /* NULL if every line was dropped */
+	} else {
+		free(out);
+	}
+	return changed;
+}
+
+void config_manual_override(VpConfig *cfg, vp_setting setting)
+{
+	switch (setting) {
+	case SETTING_THEME:
+		manual_drop_key(cfg, "theme", NULL);
+		break;
+	case SETTING_BACKGROUND:
+		manual_drop_key(cfg, "background", NULL);
+		manual_drop_key(cfg, "bg_fit", NULL);
+		break;
+	case SETTING_KEEP_CUSTOM:
+		manual_drop_key(cfg, "keep_customizations", NULL);
+		break;
+	case SETTING_TOGGLE_KEY:
+	case SETTING_SCROLLBACK:
+	case SETTING_SCROLL_STEP:
+	case SETTING_COLORS:
+		break; /* not handled here (colors are per-element below) */
+	}
+}
+
+void config_manual_override_color(VpConfig *cfg, int field_idx)
+{
+	const char *name = vp_theme_field_name(field_idx);
+	if (name) {
+		manual_drop_key(cfg, "color", name);
+	}
 }
 
 bool config_manual_shadows_setting(const VpConfig *live, vp_setting setting)

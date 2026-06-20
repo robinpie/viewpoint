@@ -111,8 +111,11 @@ void taskbar_create(WM *wm)
 		/* Base cell = the bar's background, so ncplane_erase fills the whole row
          * with it in one shot (no per-column space loop needed each redraw). */
 		uint64_t ch = 0;
-		ncchannels_set_fg_rgb8(&ch, 0xd0, 0xd0, 0xd0);
-		ncchannels_set_bg_rgb8(&ch, 0x18, 0x18, 0x20);
+		vp_rgb fg = wm->theme.bar_fg, bg = wm->theme.bar_bg;
+		ncchannels_set_fg_rgb8(&ch, (fg >> 16) & 0xff, (fg >> 8) & 0xff,
+				       fg & 0xff);
+		ncchannels_set_bg_rgb8(&ch, (bg >> 16) & 0xff, (bg >> 8) & 0xff,
+				       bg & 0xff);
 		ncplane_set_base(wm->taskbar, " ", 0, ch);
 		ncplane_move_top(wm->taskbar);
 		wm->taskbar_dirty = true;
@@ -148,14 +151,14 @@ void taskbar_draw(WM *wm)
 		bool focused = (wm_focused(wm) == win);
 
 		if (focused) {
-			ncplane_set_fg_rgb8(t, 0xff, 0xff, 0xff);
-			ncplane_set_bg_rgb8(t, 0x20, 0x40, 0x80);
+			vp_setfg(t, wm->theme.bar_focus_fg);
+			vp_setbg(t, wm->theme.bar_focus_bg);
 		} else if (win->minimized) {
-			ncplane_set_fg_rgb8(t, 0x80, 0x80, 0x80);
-			ncplane_set_bg_rgb8(t, 0x18, 0x18, 0x20);
+			vp_setfg(t, wm->theme.bar_min_fg);
+			vp_setbg(t, wm->theme.bar_min_bg);
 		} else {
-			ncplane_set_fg_rgb8(t, 0xd0, 0xd0, 0xd0);
-			ncplane_set_bg_rgb8(t, 0x28, 0x28, 0x30);
+			vp_setfg(t, wm->theme.bar_slot_fg);
+			vp_setbg(t, wm->theme.bar_slot_bg);
 		}
 
 		char buf[SLOT_W + 1];
@@ -179,27 +182,25 @@ void taskbar_draw(WM *wm)
 		bool live = wm->taskbar_scroll > 0;
 		unsigned char g = live ? 0xff : 0x55;
 		ncplane_set_fg_rgb8(t, g, g, g);
-		ncplane_set_bg_rgb8(t, 0x28, 0x28, 0x30);
+		vp_setbg(t, wm->theme.bar_arrow_bg);
 		ncplane_putstr_yx(t, 0, g_arrow_l_x0, " ◄ ");
 	}
 	if (g_arrow_r_x0 >= 0) {
 		bool live = wm->taskbar_scroll < g_maxscroll;
 		unsigned char g = live ? 0xff : 0x55;
 		ncplane_set_fg_rgb8(t, g, g, g);
-		ncplane_set_bg_rgb8(t, 0x28, 0x28, 0x30);
+		vp_setbg(t, wm->theme.bar_arrow_bg);
 		ncplane_putstr_yx(t, 0, g_arrow_r_x0, " ► ");
 	}
 
 	/* Mode indicator + clickable toggle at the far right. */
 	if (g_mode_x0 >= 0) {
-		ncplane_set_fg_rgb8(t, 0x10, 0x10, 0x10);
+		vp_setfg(t, wm->theme.bar_mode_fg);
 		if (wm->mode == MODE_PASSTHROUGH) {
-			ncplane_set_bg_rgb8(t, 0xe0, 0xa0,
-					    0x30); /* amber: passthrough */
+			vp_setbg(t, wm->theme.bar_pass_bg);
 			ncplane_putstr_yx(t, 0, g_mode_x0, " PASSTHROUGH ");
 		} else {
-			ncplane_set_bg_rgb8(t, 0x40, 0xc0,
-					    0x60); /* green: interpret */
+			vp_setbg(t, wm->theme.bar_interp_bg);
 			ncplane_putstr_yx(t, 0, g_mode_x0, "  INTERPRET  ");
 		}
 	}

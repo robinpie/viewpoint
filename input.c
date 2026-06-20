@@ -860,7 +860,7 @@ static void snap_show(WM *wm, vp_snapzone z)
 
 	struct ncplane *p = wm->snap_plane;
 	ncplane_erase(p);
-	ncplane_set_fg_rgb8(p, 0x60, 0xd0, 0xff);
+	vp_setfg(p, wm->theme.snap_outline);
 	ncplane_set_bg_alpha(p, NCALPHA_TRANSPARENT);
 	ncplane_putegc_yx(p, 0, 0, "╔", NULL);
 	ncplane_putegc_yx(p, 0, gw - 1, "╗", NULL);
