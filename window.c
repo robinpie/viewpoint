@@ -145,6 +145,20 @@ void window_set_geometry(Window *win, int x, int y, int w, int h)
 	clampgeo(&w, &h);
 	bool resized = (w != win->w || h != win->h);
 
+	/* Drop every window's bitmap planes *before* moving the frame. Two reasons:
+	 * the moving window's own planes are descendants of the frame, so moving
+	 * first would drag them to the new position and destroying them only then
+	 * would invalidate the new footprint while stranding the old one on the
+	 * terminal; and a window slid over *another* window's image occludes that
+	 * image's sprixel, which notcurses won't reliably re-emit. Re-blitting them
+	 * all after the move (with a full content repaint, since a move never runs
+	 * vt_render) wipes the old bitmaps, restores the cells they had annihilated,
+	 * and redraws every image cleanly — no full-screen refresh, so nothing
+	 * visibly blinks out. */
+	if (win->wm) {
+		sixel_drop_all(win->wm);
+	}
+
 	win->x = x;
 	win->y = y;
 	win->w = w;
@@ -161,12 +175,8 @@ void window_set_geometry(Window *win, int x, int y, int w, int h)
 			  cols); /* resizes content plane + emulator */
 		pty_set_winsize(win->pty, rows, cols);
 	}
-	/* A move slides the bound image planes along with the frame; re-evaluate
-	 * their visibility now (this re-render won't run vt_render otherwise) so an
-	 * image dragged past a screen edge has its bitmap destroyed rather than
-	 * pushed off-screen, which scrolls some terminals. */
-	if (win->nimages > 0) {
-		sixel_reposition(win);
+	if (win->wm) {
+		sixel_reblit_all(win->wm);
 	}
 	win->frame_dirty = true;
 }

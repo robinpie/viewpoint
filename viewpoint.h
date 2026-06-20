@@ -672,6 +672,12 @@ void sixel_damage(Window *w, int row0, int row1, int col0, int col1);
  * off-screen, and a pixel bitmap dragged off-screen scrolls some terminals. */
 void sixel_planes_drop(Window *w);
 
+/* Bracket a scene change that can occlude other windows' bitmaps (move, raise,
+ * restore): drop every window's planes before, re-blit them all after. See the
+ * definitions in sixel.c for why the two halves are separate. */
+void sixel_drop_all(WM *wm);
+void sixel_reblit_all(WM *wm);
+
 /* Free all per-window sixel state: the accumulation buffer and image planes. */
 void sixel_window_free(Window *w);
 

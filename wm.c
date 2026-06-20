@@ -541,8 +541,13 @@ void wm_focus_index(WM *wm, int idx)
 
 	wm->focused = idx;
 	vp_log("focus id=%d idx=%d\n", win->id, idx);
+	/* Raising a frame over another window's image occludes its sprixel, which
+	 * notcurses won't reliably re-emit; bracket the z-order change so every
+	 * window's bitmap is dropped and cleanly re-blitted at the new stacking. */
+	sixel_drop_all(wm);
 	/* Raise the focused frame and its bound content to the top. */
 	ncplane_move_family_top(win->frame);
+	sixel_reblit_all(wm);
 
 	if (prev && prev != win) {
 		prev->frame_dirty = true;

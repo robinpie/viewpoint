@@ -206,6 +206,38 @@ void sixel_planes_drop(Window *w)
 	}
 }
 
+/* A scene change (a window moved, raised, restored, …) can corrupt *other*
+ * windows' bitmaps: dragging or raising a window over an image occludes its
+ * sprixel, and notcurses' damage diff doesn't reliably re-emit it afterwards.
+ * These two halves bracket such a change: drop every window's planes first
+ * (destroying each at its current location invalidates the right cells), then
+ * after the change re-blit them all, repainting the content cells the bitmaps
+ * had annihilated. Splitting drop from re-blit lets the move path drop *before*
+ * it slides the frame, so the moving window's own old footprint is invalidated
+ * too (its planes ride the frame, so dropping after the move would target the
+ * new footprint and strand the old one). */
+void sixel_drop_all(WM *wm)
+{
+	for (int i = 0; i < wm->nwins; i++) {
+		Window *w = wm->wins[i];
+		if (!w->minimized && w->nimages > 0) {
+			sixel_planes_drop(w);
+		}
+	}
+}
+
+void sixel_reblit_all(WM *wm)
+{
+	for (int i = 0; i < wm->nwins; i++) {
+		Window *w = wm->wins[i];
+		if (!w->minimized && w->nimages > 0) {
+			w->dirty = true;
+			w->dmg_all = true;
+			sixel_reposition(w);
+		}
+	}
+}
+
 void sixel_window_free(Window *w)
 {
 	sixel_images_clear(w);
@@ -406,6 +438,17 @@ void sixel_reposition(Window *w)
 				};
 				img->plane = ncvisual_blit(w->wm->nc,
 							   img->visual, &vopts);
+				/* A newly created plane lands at the top of the
+				 * global z-order, not within its window's family
+				 * (binding governs geometry, not stacking). Left
+				 * there, a re-blitted image would float above
+				 * windows stacked over it. Anchor it just above
+				 * its own content plane so higher windows occlude
+				 * it and move_family_top keeps it with the frame. */
+				if (img->plane) {
+					ncplane_move_above(img->plane,
+							   w->content);
+				}
 				w->wm->needs_render = true;
 			}
 		} else if (img->plane) {
