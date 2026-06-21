@@ -1,5 +1,3 @@
-### still very early in development, lots of broken/incomplete things
-
 viewpoint is a terminal multiplexer with a desktop-window-manager metaphor for Linux.
 
 ![Screenshot](screenshotForReadme.png)
