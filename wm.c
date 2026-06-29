@@ -428,6 +428,7 @@ void theme_apply(WM *wm)
 	}
 	settings_icon_redraw(wm);
 	exit_icon_redraw(wm);
+	die_icon_redraw(wm);
 
 	/* Force a re-decode of any image background (palette/path may have changed),
 	 * then repaint the desktop. */
@@ -589,26 +590,18 @@ Window *wm_spawn_window(WM *wm)
 	if (h < VP_MIN_H * 2)
 		h = (int)wm->scr_rows - y - 1;
 
-	Window *win = window_create(wm, x, y, w, h);
-	if (!win) {
+	if (!session_request_new(wm, h - 2 * VP_BORDER, w - 2 * VP_BORDER)) {
 		return NULL;
 	}
-	if (!wm_add_window(wm, win)) {
-		/* Couldn't grow the window list: destroy the orphan (plane + child)
-         * rather than leak it and operate on an untracked window. */
-		window_destroy(wm, win);
-		return NULL;
-	}
-	wm_clamp_onscreen(wm, win);
-	wm_focus_window(wm, win);
-	vp_log("spawn id=%d nwins=%d\n", win->id, wm->nwins);
-	return win;
+	session_drain(wm);
+	return wm_focused(wm);
 }
 
 void wm_close_focused(WM *wm)
 {
 	Window *win = wm_focused(wm);
 	if (win) {
+		session_close(win);
 		win->dead = true; /* destroyed at end of the loop pass */
 		vp_log("close id=%d\n", win->id);
 	}
@@ -737,6 +730,7 @@ void wm_handle_resize(WM *wm)
 	background_apply(wm);
 	settings_icon_reflow(wm);
 	exit_icon_reflow(wm);
+	die_icon_reflow(wm);
 	for (int i = 0; i < wm->nwins; i++) {
 		Window *win = wm->wins[i];
 		if (win->maximized) {

@@ -347,16 +347,17 @@ static const VTermStateFallbacks state_fallbacks = {
  * rather than block on EAGAIN. */
 void vt_reply(Window *w, const char *bytes, size_t len)
 {
-	size_t off = 0;
-	while (off < len) {
-		ssize_t k = write(w->pty, bytes + off, len - off);
-		if (k > 0) {
-			off += (size_t)k;
-		} else if (k < 0 && (errno == EINTR)) {
-			continue;
-		} else {
-			/* EAGAIN or hard error: drop the rest rather than block. */
-			break;
+	if (!session_send_input(w, bytes, len) && w->pty >= 0) {
+		size_t off = 0;
+		while (off < len) {
+			ssize_t k = write(w->pty, bytes + off, len - off);
+			if (k > 0) {
+				off += (size_t)k;
+			} else if (k < 0 && (errno == EINTR)) {
+				continue;
+			} else {
+				break;
+			}
 		}
 	}
 }

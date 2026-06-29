@@ -43,7 +43,7 @@ static void clampgeo(int *w, int *h)
 		*h = VP_MIN_H;
 }
 
-Window *window_create(WM *wm, int x, int y, int w, int h)
+Window *window_create_attached(WM *wm, int id, int x, int y, int w, int h)
 {
 	clampgeo(&w, &h);
 
@@ -51,7 +51,10 @@ Window *window_create(WM *wm, int x, int y, int w, int h)
 	if (!win) {
 		return NULL;
 	}
-	win->id = wm->next_id++;
+	win->id = id;
+	if (wm->next_id <= id) {
+		wm->next_id = id + 1;
+	}
 	win->wm = wm; /* set early: vt_free in the error paths below needs it */
 	win->x = x;
 	win->y = y;
@@ -91,18 +94,14 @@ Window *window_create(WM *wm, int x, int y, int w, int h)
 
 	vt_init(win);
 
-	win->child = pty_spawn(win->rows, win->cols, &win->pty);
-	if (win->child < 0) {
-		vt_free(win);
-		ncplane_destroy(win->content);
-		ncplane_destroy(win->frame);
-		free(win);
-		return NULL;
-	}
-
 	win->dirty = true;
 	win->frame_dirty = true;
 	return win;
+}
+
+Window *window_create(WM *wm, int x, int y, int w, int h)
+{
+	return window_create_attached(wm, wm->next_id++, x, y, w, h);
 }
 
 void window_destroy(WM *wm, Window *win)
@@ -111,7 +110,7 @@ void window_destroy(WM *wm, Window *win)
 	if (!win) {
 		return;
 	}
-	if (win->child > 0) {
+	if (win->pty >= 0 && win->child > 0) {
 		/* forkpty() put the child in its own session as group leader, so its
          * pgid equals its pid. SIGHUP the whole group, not just the shell:
          * that reaches jobs the shell started in its group. */
@@ -171,7 +170,11 @@ void window_set_geometry(Window *win, int x, int y, int w, int h)
 		int cols = w - 2 * VP_BORDER;
 		vt_resize(win, rows,
 			  cols); /* resizes content plane + emulator */
-		pty_set_winsize(win->pty, rows, cols);
+		if (win->pty >= 0) {
+			pty_set_winsize(win->pty, rows, cols);
+		} else {
+			session_resize(win, rows, cols);
+		}
 	}
 	if (win->wm) {
 		sixel_reblit_all(win->wm);

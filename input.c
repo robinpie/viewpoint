@@ -1038,6 +1038,8 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
 			icon = wm->settings.icon;
 		} else if (exit_icon_hit(wm, y, x)) {
 			icon = wm->exit_icon;
+		} else if (die_icon_hit(wm, y, x)) {
+			icon = wm->die_icon;
 		}
 		if (icon) {
 			int ay, ax;
@@ -1085,6 +1087,7 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
 			wm_toggle_maximize(wm, win);
 			return;
 		case HIT_CLOSE:
+			session_close(win);
 			win->dead = true;
 			vp_log("close id=%d (button)\n", win->id);
 			return;
@@ -1152,6 +1155,9 @@ static void mouse_release(WM *wm, int btn, int y, int x, unsigned mods)
 			} else if (icon == wm->exit_icon) {
 				wm->config.exit_icon_y = ay;
 				wm->config.exit_icon_x = ax;
+			} else if (icon == wm->die_icon) {
+				wm->config.die_icon_y = ay;
+				wm->config.die_icon_x = ax;
 			}
 			config_save(&wm->config);
 			vp_log("icon: moved to y=%d x=%d (saved)\n", ay, ax);
@@ -1159,7 +1165,12 @@ static void mouse_release(WM *wm, int btn, int y, int x, unsigned mods)
 			settings_open(wm);
 		} else if (icon == wm->exit_icon) {
 			wm->should_quit = true;
-			vp_log("exit: requested via desktop icon\n");
+			wm->should_kill_session = false;
+			vp_log("exit: persist requested via desktop icon\n");
+		} else if (icon == wm->die_icon) {
+			wm->should_quit = true;
+			wm->should_kill_session = true;
+			vp_log("exit: die requested via desktop icon\n");
 		}
 		wm->drag = DRAG_NONE;
 		wm->drag_icon = NULL;

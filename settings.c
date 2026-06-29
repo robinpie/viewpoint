@@ -341,9 +341,8 @@ bool settings_icon_hit(WM *wm, int y, int x)
 	return y >= ay && y < ay + (int)r && x >= ax && x < ax + (int)c;
 }
 
-/* A sibling of the Settings tile, anchored to the bottom-right corner just
- * above the taskbar. viewpoint no longer quits when the last window closes, so
- * this is the explicit way out. */
+/* Siblings of the Settings tile, anchored to the bottom-right corner just above
+ * the taskbar. Persist detaches the UI; Die kills the daemon-owned PTYs too. */
 #define EXIT_W 12
 #define EXIT_H 4
 
@@ -363,26 +362,66 @@ static void exit_icon_geom(const WM *wm, int *y, int *x)
 	clamp_icon_pos(wm, EXIT_H, EXIT_W, y, x);
 }
 
-void exit_icon_init(WM *wm)
+static bool icon_rect_overlap(int ay, int ax, int by, int bx)
 {
-	int iy, ix;
-	exit_icon_geom(wm, &iy, &ix);
-
-	ncplane_options o = { 0 };
-	o.y = iy;
-	o.x = ix;
-	o.rows = EXIT_H;
-	o.cols = EXIT_W;
-	wm->exit_icon = ncplane_create(wm->std, &o);
-	if (!wm->exit_icon) {
-		return;
-	}
-	exit_icon_redraw(wm);
+	return ax < bx + EXIT_W && ax + EXIT_W > bx && ay < by + EXIT_H &&
+	       ay + EXIT_H > by;
 }
 
-void exit_icon_redraw(WM *wm)
+static void place_next_to_exit(const WM *wm, int ey, int ex, int *y, int *x)
 {
-	struct ncplane *p = wm->exit_icon;
+	int bottom = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
+
+	*y = ey;
+	*x = ex - EXIT_W - 1;
+	if (*x >= 0) {
+		return;
+	}
+
+	*x = ex + EXIT_W + 1;
+	if (*x + EXIT_W <= (int)wm->scr_cols) {
+		return;
+	}
+
+	*x = ex;
+	*y = ey - EXIT_H - 1;
+	if (*y >= 0) {
+		return;
+	}
+
+	*y = ey + EXIT_H + 1;
+	if (*y + EXIT_H <= bottom) {
+		return;
+	}
+
+	*y = ey;
+	*x = ex;
+}
+
+static void die_icon_geom(const WM *wm, int *y, int *x)
+{
+	int ey, ex;
+	exit_icon_geom(wm, &ey, &ex);
+	if (wm->config.die_icon_y >= 0) {
+		*y = wm->config.die_icon_y;
+		*x = wm->config.die_icon_x;
+		clamp_icon_pos(wm, EXIT_H, EXIT_W, y, x);
+		if (!icon_rect_overlap(*y, *x, ey, ex)) {
+			return;
+		}
+	} else {
+		place_next_to_exit(wm, ey, ex, y, x);
+	}
+	clamp_icon_pos(wm, EXIT_H, EXIT_W, y, x);
+	if (icon_rect_overlap(*y, *x, ey, ex)) {
+		place_next_to_exit(wm, ey, ex, y, x);
+		clamp_icon_pos(wm, EXIT_H, EXIT_W, y, x);
+	}
+}
+
+static void draw_exit_tile(WM *wm, struct ncplane *p, const char *glyph,
+			   const char *label)
+{
 	if (!p) {
 		return;
 	}
@@ -412,11 +451,45 @@ void exit_icon_redraw(WM *wm)
 	}
 
 	vp_setfg(p, wm->theme.exit_glyph);
-	ncplane_putegc_yx(p, 1, EXIT_W / 2 - 1, "⏻", NULL);
+	ncplane_putegc_yx(p, 1, EXIT_W / 2 - 1, glyph, NULL);
 
 	vp_setfg(p, wm->theme.exit_fg);
-	static const char label[] = "Exit";
-	ncplane_putstr_yx(p, 2, (EXIT_W - (int)(sizeof(label) - 1)) / 2, label);
+	ncplane_putstr_yx(p, 2, (EXIT_W - (int)strlen(label)) / 2, label);
+}
+
+void exit_icon_init(WM *wm)
+{
+	int iy, ix;
+	exit_icon_geom(wm, &iy, &ix);
+
+	ncplane_options o = { 0 };
+	o.y = iy;
+	o.x = ix;
+	o.rows = EXIT_H;
+	o.cols = EXIT_W;
+	wm->exit_icon = ncplane_create(wm->std, &o);
+	if (!wm->exit_icon) {
+		return;
+	}
+	exit_icon_redraw(wm);
+
+	die_icon_geom(wm, &iy, &ix);
+	o.y = iy;
+	o.x = ix;
+	wm->die_icon = ncplane_create(wm->std, &o);
+	if (wm->die_icon) {
+		die_icon_redraw(wm);
+	}
+}
+
+void exit_icon_redraw(WM *wm)
+{
+	draw_exit_tile(wm, wm->exit_icon, "⏻", "Persist");
+}
+
+void die_icon_redraw(WM *wm)
+{
+	draw_exit_tile(wm, wm->die_icon, "×", "Die");
 }
 
 void exit_icon_reflow(WM *wm)
@@ -427,6 +500,16 @@ void exit_icon_reflow(WM *wm)
 	int iy, ix;
 	exit_icon_geom(wm, &iy, &ix);
 	ncplane_move_yx(wm->exit_icon, iy, ix);
+}
+
+void die_icon_reflow(WM *wm)
+{
+	if (!wm->die_icon) {
+		return;
+	}
+	int iy, ix;
+	die_icon_geom(wm, &iy, &ix);
+	ncplane_move_yx(wm->die_icon, iy, ix);
 }
 
 bool exit_icon_hit(WM *wm, int y, int x)
@@ -442,11 +525,28 @@ bool exit_icon_hit(WM *wm, int y, int x)
 	return y >= ay && y < ay + (int)r && x >= ax && x < ax + (int)c;
 }
 
+bool die_icon_hit(WM *wm, int y, int x)
+{
+	struct ncplane *p = wm->die_icon;
+	if (!p) {
+		return false;
+	}
+	int ay, ax;
+	ncplane_abs_yx(p, &ay, &ax);
+	unsigned r, c;
+	ncplane_dim_yx(p, &r, &c);
+	return y >= ay && y < ay + (int)r && x >= ax && x < ax + (int)c;
+}
+
 void exit_icon_teardown(WM *wm)
 {
 	if (wm->exit_icon) {
 		ncplane_destroy(wm->exit_icon);
 		wm->exit_icon = NULL;
+	}
+	if (wm->die_icon) {
+		ncplane_destroy(wm->die_icon);
+		wm->die_icon = NULL;
 	}
 }
 

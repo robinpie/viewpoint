@@ -245,6 +245,7 @@ typedef struct VpConfig {
      * and written back to the in-app config section by config_save(). */
 	int settings_icon_y, settings_icon_x;
 	int exit_icon_y, exit_icon_x;
+	int die_icon_y, die_icon_x;
 
 	/* Theming. theme_name is the chosen preset (NULL = the default preset).
 	 * The background fields override the preset's desktop background when set:
@@ -475,9 +476,10 @@ typedef struct WM {
 	bool taskbar_dirty;
 	int taskbar_scroll; /* index of first window shown when slots overflow */
 
-	/* desktop "Exit" launcher icon, bottom-right (low z, above the background).
-     * Clicking it quits viewpoint; closing every window no longer does. */
+	/* Desktop exit launcher icons, bottom-right (low z, above the background).
+	 * Persist detaches the UI; Die also terminates the session daemon. */
 	struct ncplane *exit_icon;
+	struct ncplane *die_icon;
 
 	/* Bare Linux console vs. a GUI terminal emulator. On the console we own a
      * GPM connection directly and draw a software pointer; in a GUI terminal
@@ -518,6 +520,7 @@ typedef struct WM {
 	int last_titleclick_win; /* id of the window it landed on (0 = none) */
 
 	bool should_quit;
+	bool should_kill_session;
 
 	/* Set by mutations that change the display but don't go through a per-object
      * dirty flag (plane moves: dragged icons, the snap-preview outline, a closed
@@ -543,6 +546,10 @@ typedef struct WM {
 	struct ncvisual *bg_visual;
 	struct ncplane **bg_planes;
 	int bg_nplanes;
+
+	/* Persistent session connection. The daemon owns PTYs; the UI owns only
+	 * notcurses/libvterm views and talks to the daemon over this Unix socket. */
+	int session_fd;
 } WM;
 
 /* ------------------------------------------------------------------------- */
@@ -600,6 +607,21 @@ pid_t pty_spawn(int rows, int cols, int *master_out);
 
 /* Push a new window size to the kernel so the child receives SIGWINCH. */
 void pty_set_winsize(int master, int rows, int cols);
+
+/* ------------------------------------------------------------------------- */
+/* session.c                                                                 */
+/* ------------------------------------------------------------------------- */
+
+bool session_connect(WM *wm);
+int session_fd(WM *wm);
+bool session_request_new(WM *wm, int rows, int cols);
+bool session_send_input(Window *w, const char *bytes, size_t len);
+bool session_resize(Window *w, int rows, int cols);
+bool session_close(Window *w);
+bool session_shutdown(WM *wm);
+void session_drain(WM *wm);
+void session_close_client(WM *wm);
+int session_server_main(void);
 
 /* ------------------------------------------------------------------------- */
 /* vt_bridge.c                                                               */
@@ -691,6 +713,7 @@ void sixel_answer_xtsmgraphics(Window *w, const long *args, int argcount);
 /* ------------------------------------------------------------------------- */
 
 Window *window_create(WM *wm, int x, int y, int w, int h);
+Window *window_create_attached(WM *wm, int id, int x, int y, int w, int h);
 void window_destroy(WM *wm, Window *win);
 void window_set_geometry(Window *win, int x, int y, int w, int h);
 void window_draw_frame(WM *wm, Window *win);
@@ -801,6 +824,7 @@ void settings_init(WM *wm);
  * (their planes persist, so a theme change repaints them in place). */
 void settings_icon_redraw(WM *wm);
 void exit_icon_redraw(WM *wm);
+void die_icon_redraw(WM *wm);
 /* Re-clamp the launcher icon onto the screen after a resize (and honor a
  * user-dragged position stored in the config). */
 void settings_icon_reflow(WM *wm);
@@ -823,8 +847,10 @@ void settings_teardown(WM *wm);
 void exit_icon_init(WM *wm);
 /* Re-anchor the icon to the bottom-right corner after a screen resize. */
 void exit_icon_reflow(WM *wm);
+void die_icon_reflow(WM *wm);
 /* True if absolute cell (y,x) lands on the Exit icon. */
 bool exit_icon_hit(WM *wm, int y, int x);
+bool die_icon_hit(WM *wm, int y, int x);
 /* Destroy the icon plane on shutdown. */
 void exit_icon_teardown(WM *wm);
 

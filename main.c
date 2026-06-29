@@ -96,32 +96,12 @@ static void handle_input(WM *wm, bool *quit)
 	}
 }
 
-static void drain_window_pty(Window *win)
+int main(int argc, char **argv)
 {
-	char buf[8192];
-	for (;;) {
-		ssize_t n = read(win->pty, buf, sizeof(buf));
-		if (n > 0) {
-			vt_feed(win, buf, (size_t)n);
-		} else if (n == 0) {
-			win->dead = true; /* EOF: child exited */
-			return;
-		} else {
-			if (errno == EINTR) {
-				continue;
-			}
-			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				return;
-			}
-			/* Linux PTY master returns -1/EIO once the slave is gone. */
-			win->dead = true;
-			return;
-		}
+	if (argc > 1 && strcmp(argv[1], "--server") == 0) {
+		return session_server_main();
 	}
-}
 
-int main(void)
-{
 	setlocale(LC_ALL, "");
 
 	const char *dbgpath = getenv("VP_DEBUG");
@@ -160,6 +140,11 @@ int main(void)
 
 	WM wm;
 	wm_init(&wm, nc);
+	if (!session_connect(&wm)) {
+		notcurses_stop(nc);
+		fprintf(stderr, "viewpoint: failed to connect to session daemon\n");
+		return 1;
+	}
 
 	/* Exactly one mouse source. On the bare console we drive GPM ourselves with
      * the full event mask (so bare hover motion arrives); enabling notcurses'
@@ -178,8 +163,11 @@ int main(void)
 	exit_icon_init(
 		&wm); /* desktop Exit icon (bottom-right), below the windows */
 
-	wm_spawn_window(&wm);
-	wm_spawn_window(&wm);
+	session_drain(&wm);
+	if (wm.nwins == 0) {
+		wm_spawn_window(&wm);
+		wm_spawn_window(&wm);
+	}
 	if (wm.nwins == 0) {
 		notcurses_stop(nc);
 		fprintf(stderr, "viewpoint: failed to spawn initial window\n");
@@ -215,9 +203,9 @@ int main(void)
 	bool quit = false;
 
 	while (!quit) {
-		/* pollfds: [0]=notcurses input, [1]=gpm (console only), then one per
-         * window PTY */
-		int need = wm.nwins + 2;
+		/* pollfds: [0]=notcurses input, [1]=session socket, [2]=gpm
+		 * (console only). The session daemon owns PTY masters. */
+		int need = 3;
 		if (need > pfds_cap) {
 			struct pollfd *np =
 				realloc(pfds, (size_t)need * sizeof(*np));
@@ -234,20 +222,20 @@ int main(void)
 		pfds[nfd].revents = 0;
 		int input_idx = nfd++;
 
+		int session_idx = -1;
+		if (session_fd(&wm) >= 0) {
+			pfds[nfd].fd = session_fd(&wm);
+			pfds[nfd].events = POLLIN;
+			pfds[nfd].revents = 0;
+			session_idx = nfd++;
+		}
+
 		int gpm_idx = -1;
 		if (wm.gpm_active && wm.gpm_fd >= 0) {
 			pfds[nfd].fd = wm.gpm_fd;
 			pfds[nfd].events = POLLIN;
 			pfds[nfd].revents = 0;
 			gpm_idx = nfd++;
-		}
-
-		int first_win = nfd;
-		for (int i = 0; i < wm.nwins; i++) {
-			pfds[nfd].fd = wm.wins[i]->pty;
-			pfds[nfd].events = POLLIN;
-			pfds[nfd].revents = 0;
-			nfd++;
 		}
 
 		int pr = poll(pfds, (nfds_t)nfd, -1);
@@ -265,13 +253,12 @@ int main(void)
 		if (pfds[input_idx].revents & POLLIN) {
 			handle_input(&wm, &quit);
 		}
+		if (session_idx >= 0 &&
+		    (pfds[session_idx].revents & (POLLIN | POLLHUP | POLLERR))) {
+			session_drain(&wm);
+		}
 		if (gpm_idx >= 0 && (pfds[gpm_idx].revents & POLLIN)) {
 			gpm_pump(&wm);
-		}
-		for (int i = 0; i < wm.nwins; i++) {
-			if (pfds[first_win + i].revents & (POLLIN | POLLHUP)) {
-				drain_window_pty(wm.wins[i]);
-			}
 		}
 
 		if (g_sigchld) {
@@ -291,9 +278,12 @@ int main(void)
 			}
 		}
 		/* Closing the last window no longer quits: the desktop persists with
-         * its taskbar and launcher icons. The only ways out are the Exit icon
-         * (wm.should_quit) and host EOF on the input fd. */
+		 * its taskbar and launcher icons. The only ways out are the exit
+		 * launcher icons (wm.should_quit) and host EOF on the input fd. */
 		if (wm.should_quit) {
+			if (wm.should_kill_session) {
+				session_shutdown(&wm);
+			}
 			quit = true;
 		}
 
@@ -307,6 +297,7 @@ int main(void)
 	}
 	free(wm.wins);
 	free(pfds);
+	session_close_client(&wm);
 	exit_icon_teardown(&wm);
 	settings_teardown(&wm);
 	background_free(&wm);

@@ -218,6 +218,10 @@ static bool config_apply(VpConfig *cfg, const char *key, char *val, int line)
 		} else if (strcmp(name, "exit") == 0) {
 			cfg->exit_icon_x = x;
 			cfg->exit_icon_y = y;
+		} else if (strcmp(name, "die") == 0 ||
+			   strcmp(name, "exit_die") == 0) {
+			cfg->die_icon_x = x;
+			cfg->die_icon_y = y;
 		} else {
 			vp_log("config: line %d: unknown icon '%s'\n", line,
 			       name);
@@ -396,6 +400,7 @@ void config_defaults(VpConfig *cfg)
 	/* -1 = "unset": use each icon's built-in default placement. */
 	cfg->settings_icon_y = cfg->settings_icon_x = -1;
 	cfg->exit_icon_y = cfg->exit_icon_x = -1;
+	cfg->die_icon_y = cfg->die_icon_x = -1;
 	cfg->scrollback_max = VP_SCROLLBACK_MAX;
 	cfg->scroll_step = VP_SCROLL_STEP;
 	cfg->theme_name = NULL;
@@ -491,6 +496,11 @@ static void write_inapp_diff(FILE *f, const VpConfig *cfg, const VpConfig *base)
 				      cfg->exit_icon_x != base->exit_icon_x)) {
 		fprintf(f, "icon = exit %d %d\n", cfg->exit_icon_x,
 			cfg->exit_icon_y);
+	}
+	if (cfg->die_icon_y >= 0 && (cfg->die_icon_y != base->die_icon_y ||
+				     cfg->die_icon_x != base->die_icon_x)) {
+		fprintf(f, "icon = die %d %d\n", cfg->die_icon_x,
+			cfg->die_icon_y);
 	}
 
 	if (cfg->keep_customizations != base->keep_customizations) {
