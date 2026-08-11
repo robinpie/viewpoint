@@ -1,3 +1,5 @@
+**Note: Turns out writing a compositor from scratch is hard! I haven't abandoned this project, I'm just struggling to do meaningful work on it.**
+
 viewpoint is a terminal multiplexer with a desktop-window-manager metaphor for Linux.
 
 ![Screenshot](screenshotForReadme.png)
