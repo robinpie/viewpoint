@@ -98,27 +98,16 @@ static void compute_layout(WM *wm)
 	}
 }
 
+static void taskbar_paint(struct ncplane *t, bool full, void *user);
+
 void taskbar_create(WM *wm)
 {
-	ncplane_options o = { 0 };
-	o.y = (int)wm->scr_rows - 1;
-	o.x = 0;
-	o.rows = 1;
-	o.cols = wm->scr_cols;
-	wm->taskbar = ncplane_create(wm->std, &o);
-	if (wm->taskbar) {
-		/* Base cell = the bar's background, so ncplane_erase fills the whole row
-         * with it in one shot (no per-column space loop needed each redraw). */
-		uint64_t ch = 0;
-		vp_rgb fg = wm->theme.bar_fg, bg = wm->theme.bar_bg;
-		ncchannels_set_fg_rgb8(&ch, (fg >> 16) & 0xff, (fg >> 8) & 0xff,
-				       fg & 0xff);
-		ncchannels_set_bg_rgb8(&ch, (bg >> 16) & 0xff, (bg >> 8) & 0xff,
-				       bg & 0xff);
-		ncplane_set_base(wm->taskbar, " ", 0, ch);
-		ncplane_move_top(wm->taskbar);
-		wm->taskbar_dirty = true;
-	}
+	/* VP_BAND_OVERLAY is what keeps the bar above every window. It is stated
+	 * once, here, instead of being re-asserted with a move_top on every
+	 * focus change and every render pass. */
+	vp_rect r = { (int)wm->scr_rows - 1, 0, 1, (int)wm->scr_cols };
+	wm->taskbar =
+		comp_layer_new(wm->comp, VP_BAND_OVERLAY, r, taskbar_paint, wm);
 }
 
 void taskbar_reflow(WM *wm)
@@ -126,19 +115,32 @@ void taskbar_reflow(WM *wm)
 	if (!wm->taskbar) {
 		return;
 	}
-	ncplane_resize_simple(wm->taskbar, 1, wm->scr_cols);
-	ncplane_move_yx(wm->taskbar, (int)wm->scr_rows - 1, 0);
-	ncplane_move_top(wm->taskbar);
-	wm->taskbar_dirty = true;
+	comp_layer_resize(wm->taskbar, 1, (int)wm->scr_cols);
+	comp_layer_move(wm->taskbar, (int)wm->scr_rows - 1, 0);
+	taskbar_damage(wm);
 }
 
-void taskbar_draw(WM *wm)
+void taskbar_damage(WM *wm)
 {
-	struct ncplane *t = wm->taskbar;
-	if (!t) {
-		return;
-	}
+	comp_layer_damage(wm->taskbar);
+}
+
+static void taskbar_paint(struct ncplane *t, bool full, void *user)
+{
+	(void)full;
+	WM *wm = user;
 	compute_layout(wm);
+
+	/* Base cell = the bar's background, so the erase below fills the whole
+	 * row with it in one shot. Re-applied every paint so a theme change
+	 * needs nothing but a damage. */
+	uint64_t ch = 0;
+	vp_rgb bfg = wm->theme.bar_fg, bbg = wm->theme.bar_bg;
+	ncchannels_set_fg_rgb8(&ch, (bfg >> 16) & 0xff, (bfg >> 8) & 0xff,
+			       bfg & 0xff);
+	ncchannels_set_bg_rgb8(&ch, (bbg >> 16) & 0xff, (bbg >> 8) & 0xff,
+			       bbg & 0xff);
+	ncplane_set_base(t, " ", 0, ch);
 
 	ncplane_set_styles(t, NCSTYLE_NONE);
 	ncplane_erase(t);
@@ -200,8 +202,6 @@ void taskbar_draw(WM *wm)
 			ncplane_putstr_yx(t, 0, g_mode_x0, "  INTERPRET  ");
 		}
 	}
-
-	wm->taskbar_dirty = false;
 }
 
 bool taskbar_click(WM *wm, int y, int x)
@@ -214,10 +214,10 @@ bool taskbar_click(WM *wm, int y, int x)
 	if (x >= g_mode_x0) {
 		wm->mode = (wm->mode == MODE_INTERPRET) ? MODE_PASSTHROUGH :
 							  MODE_INTERPRET;
-		wm->taskbar_dirty = true;
+		taskbar_damage(wm);
 		for (int i = 0; i < wm->nwins; i++) {
-			wm->wins[i]->frame_dirty =
-				true; /* per-window indicator changes */
+			window_damage_frame(
+				wm->wins[i]); /* per-window indicator changes */
 		}
 		return true;
 	}
@@ -262,7 +262,7 @@ void taskbar_scroll_by(WM *wm, int delta)
 	}
 	if (s != wm->taskbar_scroll) {
 		wm->taskbar_scroll = s;
-		wm->taskbar_dirty = true;
+		taskbar_damage(wm);
 	}
 }
 
@@ -291,6 +291,6 @@ void taskbar_reveal(WM *wm, int win_idx)
 	}
 	if (s != wm->taskbar_scroll) {
 		wm->taskbar_scroll = s;
-		wm->taskbar_dirty = true;
+		taskbar_damage(wm);
 	}
 }

@@ -40,9 +40,10 @@ static void toggle_mode(WM *wm)
 {
 	wm->mode = (wm->mode == MODE_INTERPRET) ? MODE_PASSTHROUGH :
 						  MODE_INTERPRET;
-	wm->taskbar_dirty = true;
+	taskbar_damage(wm);
 	for (int i = 0; i < wm->nwins; i++) {
-		wm->wins[i]->frame_dirty = true; /* per-window mode indicator */
+		window_damage_frame(
+			wm->wins[i]); /* per-window mode indicator */
 	}
 	vp_log("mode=%s\n",
 	       wm->mode == MODE_PASSTHROUGH ? "PASSTHRU" : "INTERPRET");
@@ -688,7 +689,7 @@ static VTermModifier to_vmod(unsigned mods)
 	return m;
 }
 
-/* ----- title-bar hit testing (must mirror window_draw_frame's layout) ----- */
+/* ----- title-bar hit testing (must mirror frame_paint's layout) ----- */
 
 typedef enum { HIT_MOVE, HIT_MIN, HIT_MAX, HIT_CLOSE } titlehit;
 
@@ -797,12 +798,36 @@ static vp_snapzone snap_zone_at(WM *wm, int y, int x)
 
 static void snap_hide(WM *wm)
 {
-	if (wm->snap_plane) {
-		ncplane_move_yx(wm->snap_plane, VP_HIDDEN_Y, 0);
-		wm->needs_render =
-			true; /* outline moved off-screen; recomposite */
+	if (wm->snap_layer) {
+		comp_layer_show(wm->snap_layer, false);
 	}
 	wm->snap_preview = SNAP_NONE;
+}
+
+/* The preview outline is a hollow rectangle, so it must not be treated as
+ * covering what it is drawn over - a bitmap under the outline stays visible. */
+static void snap_paint(struct ncplane *p, bool full, void *user)
+{
+	(void)full;
+	WM *wm = user;
+	vp_rect r = comp_layer_rect(wm->snap_layer);
+	int gh = r.h, gw = r.w;
+
+	ncplane_erase(p);
+	vp_setfg(p, wm->theme.snap_outline);
+	ncplane_set_bg_alpha(p, NCALPHA_TRANSPARENT);
+	ncplane_putegc_yx(p, 0, 0, "╔", NULL);
+	ncplane_putegc_yx(p, 0, gw - 1, "╗", NULL);
+	ncplane_putegc_yx(p, gh - 1, 0, "╚", NULL);
+	ncplane_putegc_yx(p, gh - 1, gw - 1, "╝", NULL);
+	for (int c = 1; c < gw - 1; c++) {
+		ncplane_putegc_yx(p, 0, c, "═", NULL);
+		ncplane_putegc_yx(p, gh - 1, c, "═", NULL);
+	}
+	for (int r2 = 1; r2 < gh - 1; r2++) {
+		ncplane_putegc_yx(p, r2, 0, "║", NULL);
+		ncplane_putegc_yx(p, r2, gw - 1, "║", NULL);
+	}
 }
 
 static void snap_show(WM *wm, vp_snapzone z)
@@ -817,46 +842,28 @@ static void snap_show(WM *wm, vp_snapzone z)
 		return;
 	}
 
-	if (!wm->snap_plane) {
-		ncplane_options o = { 0 };
-		o.y = gy;
-		o.x = gx;
-		o.rows = (unsigned)gh;
-		o.cols = (unsigned)gw;
-		wm->snap_plane = ncplane_create(wm->std, &o);
-		if (!wm->snap_plane) {
+	if (!wm->snap_layer) {
+		vp_rect r = { gy, gx, gh, gw };
+		wm->snap_layer = comp_layer_new(wm->comp, VP_BAND_OVERLAY, r,
+						snap_paint, wm);
+		if (!wm->snap_layer) {
 			return;
 		}
 		uint64_t base =
 			0; /* transparent interior so windows show through */
 		ncchannels_set_fg_alpha(&base, NCALPHA_TRANSPARENT);
 		ncchannels_set_bg_alpha(&base, NCALPHA_TRANSPARENT);
-		ncplane_set_base(wm->snap_plane, "", 0, base);
+		ncplane_set_base(comp_layer_plane(wm->snap_layer), "", 0, base);
+		comp_layer_set_opaque(wm->snap_layer, false);
 	} else {
-		ncplane_resize_simple(wm->snap_plane, (unsigned)gh,
-				      (unsigned)gw);
-		ncplane_move_yx(wm->snap_plane, gy, gx);
+		comp_layer_resize(wm->snap_layer, gh, gw);
+		comp_layer_move(wm->snap_layer, gy, gx);
+		comp_layer_show(wm->snap_layer, true);
+		comp_layer_damage(wm->snap_layer);
 	}
-
-	struct ncplane *p = wm->snap_plane;
-	ncplane_erase(p);
-	vp_setfg(p, wm->theme.snap_outline);
-	ncplane_set_bg_alpha(p, NCALPHA_TRANSPARENT);
-	ncplane_putegc_yx(p, 0, 0, "╔", NULL);
-	ncplane_putegc_yx(p, 0, gw - 1, "╗", NULL);
-	ncplane_putegc_yx(p, gh - 1, 0, "╚", NULL);
-	ncplane_putegc_yx(p, gh - 1, gw - 1, "╝", NULL);
-	for (int c = 1; c < gw - 1; c++) {
-		ncplane_putegc_yx(p, 0, c, "═", NULL);
-		ncplane_putegc_yx(p, gh - 1, c, "═", NULL);
-	}
-	for (int r = 1; r < gh - 1; r++) {
-		ncplane_putegc_yx(p, r, 0, "║", NULL);
-		ncplane_putegc_yx(p, r, gw - 1, "║", NULL);
-	}
-	ncplane_move_top(p);
+	comp_layer_raise(
+		wm->snap_layer); /* above the taskbar, within the band */
 	wm->snap_preview = z;
-	wm->needs_render = true; /* outline shown/moved; recomposite */
 }
 
 static void content_forward(Window *win, mev_type t, int btn, int y, int x,
@@ -910,17 +917,16 @@ static void update_drag(WM *wm, int y, int x)
 	/* Desktop-icon drag: just slide the tile under the pointer, clamped on the
      * screen. Handled before the window lookup below, which doesn't apply. */
 	if (wm->drag == DRAG_ICON) {
-		struct ncplane *icon = wm->drag_icon;
+		vp_layer *icon = wm->drag_icon;
 		if (!icon) {
 			wm->drag = DRAG_NONE;
 			return;
 		}
-		unsigned ih, iw;
-		ncplane_dim_yx(icon, &ih, &iw);
+		vp_rect ir = comp_layer_rect(icon);
 		int ny = y - wm->drag_off_y;
 		int nx = x - wm->drag_off_x;
-		int maxy = (int)wm->scr_rows - (wm->taskbar ? 1 : 0) - (int)ih;
-		int maxx = (int)wm->scr_cols - (int)iw;
+		int maxy = (int)wm->scr_rows - (wm->taskbar ? 1 : 0) - ir.h;
+		int maxx = (int)wm->scr_cols - ir.w;
 		if (ny > maxy)
 			ny = maxy;
 		if (nx > maxx)
@@ -929,8 +935,7 @@ static void update_drag(WM *wm, int y, int x)
 			ny = 0;
 		if (nx < 0)
 			nx = 0;
-		ncplane_move_yx(icon, ny, nx);
-		wm->needs_render = true;
+		comp_layer_move(icon, ny, nx);
 		return;
 	}
 
@@ -969,10 +974,7 @@ static void update_drag(WM *wm, int y, int x)
 			nx = (int)wm->scr_cols - 2;
 		window_set_geometry(win, nx, ny, win->w, win->h);
 		snap_show(wm, snap_zone_at(wm, y, x));
-		ncplane_move_family_top(win->frame);
-		if (wm->taskbar) {
-			ncplane_move_top(wm->taskbar);
-		}
+		comp_layer_raise(win->frame);
 		return;
 	}
 
@@ -1033,7 +1035,7 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
 		/* Empty desktop: a launcher icon may have been grabbed. Begin a drag;
          * a release that never moved it is treated as a plain click (which then
          * opens settings / quits - see mouse_release). */
-		struct ncplane *icon = NULL;
+		vp_layer *icon = NULL;
 		if (settings_icon_hit(wm, y, x)) {
 			icon = wm->settings.icon;
 		} else if (exit_icon_hit(wm, y, x)) {
@@ -1042,14 +1044,13 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
 			icon = wm->die_icon;
 		}
 		if (icon) {
-			int ay, ax;
-			ncplane_abs_yx(icon, &ay, &ax);
+			vp_rect r = comp_layer_abs(icon);
 			wm->drag = DRAG_ICON;
 			wm->drag_icon = icon;
-			wm->drag_icon_y0 = ay;
-			wm->drag_icon_x0 = ax;
-			wm->drag_off_y = y - ay;
-			wm->drag_off_x = x - ax;
+			wm->drag_icon_y0 = r.y;
+			wm->drag_icon_x0 = r.x;
+			wm->drag_off_y = y - r.y;
+			wm->drag_off_x = x - r.x;
 		}
 		return;
 	}
@@ -1141,11 +1142,13 @@ static void mouse_release(WM *wm, int btn, int y, int x, unsigned mods)
      * moved, persist its new spot to the config; otherwise the press+release was
      * a plain click, so run the icon's normal action. */
 	if (wm->drag == DRAG_ICON) {
-		struct ncplane *icon = wm->drag_icon;
+		vp_layer *icon = wm->drag_icon;
 		update_drag(wm, y, x);
 		int ay = wm->drag_icon_y0, ax = wm->drag_icon_x0;
 		if (icon) {
-			ncplane_abs_yx(icon, &ay, &ax);
+			vp_rect r = comp_layer_abs(icon);
+			ay = r.y;
+			ax = r.x;
 		}
 		bool moved = (ay != wm->drag_icon_y0 || ax != wm->drag_icon_x0);
 		if (moved) {

@@ -66,7 +66,7 @@ static int cb_damage(VTermRect rect, void *user)
 		sixel_damage(w, rect.start_row, rect.end_row, rect.start_col,
 			     rect.end_col);
 	}
-	w->dirty = true;
+	window_damage_content(w, false);
 	return 1;
 }
 
@@ -78,7 +78,7 @@ static int cb_moverect(VTermRect dest, VTermRect src, void *user)
      * moved region precisely; the precise-damage win is for small in-place edits. */
 	Window *w = user;
 	dmg_full(w);
-	w->dirty = true;
+	window_damage_content(w, false);
 	return 1;
 }
 
@@ -133,7 +133,7 @@ static int cb_resize(int rows, int cols, void *user)
 	(void)cols;
 	Window *w = user;
 	dmg_full(w);
-	w->dirty = true;
+	window_damage_content(w, false);
 	return 1;
 }
 
@@ -188,7 +188,7 @@ static int cb_sb_pushline(int cols, const VTermScreenCell *cells, void *user)
 		w->sb_offset++;
 	}
 	dmg_full(w);
-	w->dirty = true;
+	window_damage_content(w, false);
 	return 1;
 }
 
@@ -220,7 +220,7 @@ static int cb_sb_popline(int cols, VTermScreenCell *cells, void *user)
 		w->sb_offset = w->sb_count;
 	}
 	dmg_full(w);
-	w->dirty = true;
+	window_damage_content(w, false);
 	return 1;
 }
 
@@ -236,7 +236,7 @@ static int cb_sb_clear(void *user)
 	w->sb_offset = 0;
 	sixel_images_clear(w);
 	dmg_full(w);
-	w->dirty = true;
+	window_damage_content(w, false);
 	return 1;
 }
 
@@ -290,7 +290,7 @@ static int cb_csi(const char *leader, const long args[], int argcount,
 	Window *w = user;
 	if (command == 'S' && leader && leader[0] == '?' &&
 	    (!intermed || !intermed[0]) && argcount >= 2) {
-		if (w->wm && w->wm->pixel_ok) {
+		if (w->wm && comp_graphics_ok(w->wm->comp)) {
 			sixel_answer_xtsmgraphics(w, args, argcount);
 		}
 		return 1;
@@ -378,7 +378,7 @@ static void cb_output(const char *s, size_t len, void *user)
 	static const char da1[] = "\x1b[?1;2c";
 	static const char da1_sixel[] = "\x1b[?62;1;2;4c";
 	const size_t dn = sizeof(da1) - 1;
-	bool advertise = w->wm && w->wm->pixel_ok;
+	bool advertise = w->wm && comp_graphics_ok(w->wm->comp);
 
 	size_t start = 0;
 	for (size_t i = 0; advertise && i + dn <= len;) {
@@ -408,7 +408,7 @@ void vt_init(Window *w)
 
 	w->cursor_visible = true;
 	dmg_full(w);
-	w->dirty = true;
+	window_damage_content(w, false);
 }
 
 void vt_feed(Window *w, const char *bytes, size_t n)
@@ -423,7 +423,7 @@ void vt_feed(Window *w, const char *bytes, size_t n)
 		vterm_input_write(w->vt, "\r\n", 2);
 		w->six_pending_lf--;
 	}
-	w->dirty = true;
+	window_damage_content(w, false);
 }
 
 void vt_resize(Window *w, int rows, int cols)
@@ -441,12 +441,9 @@ void vt_resize(Window *w, int rows, int cols)
      * and the cell-pixel geometry may differ; drop the images. */
 	sixel_images_clear(w);
 	vterm_set_size(w->vt, rows, cols);
-	if (w->content) {
-		ncplane_resize_simple(w->content, (unsigned)rows,
-				      (unsigned)cols);
-	}
+	comp_layer_resize(w->content, rows, cols);
 	dmg_full(w);
-	w->dirty = true;
+	window_damage_content(w, false);
 }
 
 void vt_scroll(Window *w, int delta)
@@ -459,9 +456,9 @@ void vt_scroll(Window *w, int delta)
 	if (off != w->sb_offset) {
 		w->sb_offset = off;
 		dmg_full(w);
-		w->dirty = true;
-		w->frame_dirty =
-			true; /* refresh the title-bar scrollback indicator */
+		window_damage_content(w, false);
+		/* refresh the title-bar scrollback indicator */
+		window_damage_frame(w);
 	}
 }
 
@@ -486,7 +483,7 @@ void vt_set_scrollback_max(Window *w, int max)
 		w->sb = NULL;
 		w->sb_cap = w->sb_count = w->sb_head = w->sb_offset = 0;
 		dmg_full(w);
-		w->dirty = true;
+		window_damage_content(w, false);
 		return;
 	}
 
@@ -511,7 +508,7 @@ void vt_set_scrollback_max(Window *w, int max)
 		w->sb_offset = w->sb_count;
 	}
 	dmg_full(w);
-	w->dirty = true;
+	window_damage_content(w, false);
 }
 
 void vt_free(Window *w)
@@ -575,8 +572,8 @@ void vt_send_key(Window *w, const ncinput *ni)
 	/* Typing snaps the view back to the live screen, like a real terminal. */
 	if (w->sb_offset != 0) {
 		w->sb_offset = 0;
-		w->dirty = true;
-		w->frame_dirty = true;
+		window_damage_content(w, false);
+		window_damage_frame(w);
 	}
 
 	VTermModifier mod = vterm_mods(ni);
@@ -807,7 +804,7 @@ static void paint_cell(struct ncplane *n, const VTermScreen *vts, cellcache *cc,
 
 void vt_render(Window *w)
 {
-	struct ncplane *n = w->content;
+	struct ncplane *n = comp_layer_plane(w->content);
 	if (!n) {
 		return;
 	}
@@ -874,9 +871,6 @@ void vt_render(Window *w)
 			}
 		}
 	}
-	sixel_reposition(w);
-
-	w->dirty = false;
 	w->dmg_all = false;
 	w->dmg_valid = false;
 }

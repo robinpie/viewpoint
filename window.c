@@ -17,11 +17,15 @@
 
 /* window.c - per-window lifecycle and frame (chrome) drawing.
  *
- * A window is a decoration ("frame") plane that parents a "content" plane.
- * The frame draws the border ring + title bar; the content plane sits in the
- * 1-cell interior and shows the child's terminal grid. Because the content
- * plane is bound to the frame, moving/raising the frame carries the content
- * with it.
+ * A window is a decoration ("frame") layer with a "content" sublayer. The frame
+ * draws the border ring + title bar; the content sits in the 1-cell interior and
+ * shows the child's terminal grid. Being a sublayer, the content (and every
+ * image anchored in it) moves, raises and hides with the frame - the window as a
+ * whole is one thing to the compositor.
+ *
+ * Both layers hand the compositor a painter and then never draw again on their
+ * own: the code here only ever says "this needs repainting" and lets the
+ * compositor decide when, and whether the result is worth a present.
  */
 #define _GNU_SOURCE
 #include "viewpoint.h"
@@ -41,6 +45,29 @@ static void clampgeo(int *w, int *h)
 		*w = VP_MIN_W;
 	if (*h < VP_MIN_H)
 		*h = VP_MIN_H;
+}
+
+static void frame_paint(struct ncplane *p, bool full, void *user);
+static void content_paint(struct ncplane *p, bool full, void *user);
+
+void window_damage_frame(Window *win)
+{
+	if (win) {
+		comp_layer_damage(win->frame);
+	}
+}
+
+/* `full` forces a from-scratch sweep of the grid rather than an incremental one
+ * over the rows libvterm reported as damaged. */
+void window_damage_content(Window *win, bool full)
+{
+	if (!win) {
+		return;
+	}
+	if (full) {
+		win->dmg_all = true;
+	}
+	comp_layer_damage(win->content);
 }
 
 Window *window_create_attached(WM *wm, int id, int x, int y, int w, int h)
@@ -67,35 +94,26 @@ Window *window_create_attached(WM *wm, int id, int x, int y, int w, int h)
 	win->sb_max = wm->config.scrollback_max;
 	snprintf(win->title, sizeof(win->title), "shell %d", win->id);
 
-	ncplane_options fopts = { 0 };
-	fopts.y = y;
-	fopts.x = x;
-	fopts.rows = (unsigned)h;
-	fopts.cols = (unsigned)w;
-	fopts.userptr =
-		win; /* lets wm_window_at map a plane back to its Window */
-	win->frame = ncplane_create(wm->std, &fopts);
+	/* The frame is the window as far as the compositor is concerned: it
+	 * carries the band/order that decides stacking, and the user pointer
+	 * that turns a hit test back into a Window. */
+	vp_rect fr = { y, x, h, w };
+	win->frame =
+		comp_layer_new(wm->comp, VP_BAND_WINDOW, fr, frame_paint, win);
 	if (!win->frame) {
 		free(win);
 		return NULL;
 	}
 
-	ncplane_options copts = { 0 };
-	copts.y = VP_BORDER;
-	copts.x = VP_BORDER;
-	copts.rows = (unsigned)win->rows;
-	copts.cols = (unsigned)win->cols;
-	win->content = ncplane_create(win->frame, &copts);
+	vp_rect cr = { VP_BORDER, VP_BORDER, win->rows, win->cols };
+	win->content = comp_sublayer_new(win->frame, cr, content_paint, win);
 	if (!win->content) {
-		ncplane_destroy(win->frame);
+		comp_layer_destroy(win->frame);
 		free(win);
 		return NULL;
 	}
 
 	vt_init(win);
-
-	win->dirty = true;
-	win->frame_dirty = true;
 	return win;
 }
 
@@ -125,15 +143,11 @@ void window_destroy(WM *wm, Window *win)
 		close(win->pty);
 		win->pty = -1;
 	}
-	/* Destroying the frame also drops bound children, but be explicit. */
-	if (win->content) {
-		ncplane_destroy(win->content);
-		win->content = NULL;
-	}
-	if (win->frame) {
-		ncplane_destroy(win->frame);
-		win->frame = NULL;
-	}
+	/* One call takes the whole family: the content sublayer and every image
+	 * anchored in it are owned by the frame. */
+	comp_layer_destroy(win->frame);
+	win->frame = NULL;
+	win->content = NULL;
 	free(win);
 }
 
@@ -142,44 +156,31 @@ void window_set_geometry(Window *win, int x, int y, int w, int h)
 	clampgeo(&w, &h);
 	bool resized = (w != win->w || h != win->h);
 
-	/* Drop every window's bitmap planes *before* moving the frame. Two reasons:
-	 * the moving window's own planes are descendants of the frame, so moving
-	 * first would drag them to the new position and destroying them only then
-	 * would invalidate the new footprint while stranding the old one on the
-	 * terminal; and a window slid over *another* window's image occludes that
-	 * image's sprixel, which notcurses won't reliably re-emit. Re-blitting them
-	 * all after the move (with a full content repaint, since a move never runs
-	 * vt_render) wipes the old bitmaps, restores the cells they had annihilated,
-	 * and redraws every image cleanly — no full-screen refresh, so nothing
-	 * visibly blinks out. */
-	if (win->wm) {
-		sixel_drop_all(win->wm);
-	}
-
+	/* Moving a window is just a geometry change now. It used to have to tear
+	 * down and re-blit every image in every window around it, because nothing
+	 * knew which bitmaps the move would occlude; the compositor works that
+	 * out for itself from the new scene. */
 	win->x = x;
 	win->y = y;
 	win->w = w;
 	win->h = h;
 
-	ncplane_move_yx(win->frame, y, x);
+	comp_layer_move(win->frame, y, x);
 	vp_log("geom id=%d x=%d y=%d w=%d h=%d\n", win->id, x, y, w, h);
 
 	if (resized) {
-		ncplane_resize_simple(win->frame, (unsigned)h, (unsigned)w);
+		comp_layer_resize(win->frame, h, w);
 		int rows = h - 2 * VP_BORDER;
 		int cols = w - 2 * VP_BORDER;
 		vt_resize(win, rows,
-			  cols); /* resizes content plane + emulator */
+			  cols); /* resizes content layer + emulator */
 		if (win->pty >= 0) {
 			pty_set_winsize(win->pty, rows, cols);
 		} else {
 			session_resize(win, rows, cols);
 		}
 	}
-	if (win->wm) {
-		sixel_reblit_all(win->wm);
-	}
-	win->frame_dirty = true;
+	window_damage_frame(win);
 }
 
 static const char *login_name(void)
@@ -305,15 +306,17 @@ bool window_refresh_title(Window *win)
 		return false;
 	}
 	memcpy(win->title, fitted, sizeof(fitted));
-	win->frame_dirty = true;
+	window_damage_frame(win);
 	return true;
 }
 
 /* Draw the border ring and title bar onto the frame plane. The content plane
  * (a child) covers the interior, so we only paint the perimeter. */
-void window_draw_frame(WM *wm, Window *win)
+static void frame_paint(struct ncplane *f, bool full, void *user)
 {
-	struct ncplane *f = win->frame;
+	(void)full; /* the chrome is cheap and always redrawn in full */
+	Window *win = user;
+	WM *wm = win->wm;
 	bool focused = (wm_focused(wm) == win);
 	int w = win->w;
 	int h = win->h;
@@ -371,6 +374,20 @@ void window_draw_frame(WM *wm, Window *win)
 		}
 		ncplane_putstr_yx(f, 0, tstart, buf);
 	}
+}
 
-	win->frame_dirty = false;
+/* Painter for the terminal grid. `full` says a pixel bitmap that overlapped
+ * this window has just been torn down, so the cells it had annihilated have to
+ * be repainted - the emulator's own row damage knows nothing about that. */
+static void content_paint(struct ncplane *p, bool full, void *user)
+{
+	(void)p;
+	Window *win = user;
+	if (full) {
+		win->dmg_all = true;
+	}
+	/* Images are pinned to absolute scrollback rows; resolve those anchors
+	 * against the current view before the grid is swept over them. */
+	sixel_sync(win);
+	vt_render(win);
 }

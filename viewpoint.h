@@ -18,8 +18,13 @@
 /* viewpoint.h - shared declarations for the viewpoint terminal multiplexer.
  *
  * A single-process, single-threaded, poll(2)-driven WM that presents floating
- * "windows", each running a shell/app in its own PTY + libvterm instance, drawn
- * onto a notcurses ncplane stack.
+ * "windows", each running a shell/app in its own PTY + libvterm instance.
+ *
+ * Everything that reaches the screen goes through the compositor (compositor.h)
+ * as a layer: this file's job is the *policy* - which windows exist, which one
+ * has focus, where they sit - while the compositor owns stacking, visibility,
+ * pixel graphics and presentation. No code outside compositor.c calls
+ * notcurses_render or moves a plane in the z-order.
  */
 #ifndef VIEWPOINT_H
 #define VIEWPOINT_H
@@ -29,6 +34,8 @@
 #include <sys/types.h>
 #include <notcurses/notcurses.h>
 #include <vterm.h>
+
+#include "compositor.h"
 
 /* ------------------------------------------------------------------------- */
 /* Tunables                                                                  */
@@ -55,10 +62,6 @@
 #define VP_SCROLL_STEP 3
 #define VP_SCROLLBACK_LIMIT 100000 /* upper bound on retained lines */
 #define VP_SCROLL_STEP_MAX 50 /* upper bound on the wheel notch size */
-
-/* Off-screen parking row for hidden planes (minimized windows, idle snap
- * preview). Far below any real screen. */
-#define VP_HIDDEN_Y 100000
 
 /* How close (in cells) the pointer must come to a screen edge during a move
  * drag to arm an edge/corner snap. */
@@ -147,10 +150,12 @@ typedef struct VpTheme {
 	vp_rgb snap_outline;
 
 	/* Desktop background. */
-	vp_rgb bg_fg, bg_bg; /* glyph colors (SOLID/PATTERN, and IMAGE letterbox) */
+	vp_rgb bg_fg,
+		bg_bg; /* glyph colors (SOLID/PATTERN, and IMAGE letterbox) */
 	vp_bg_mode bg_mode;
 	vp_bg_fit bg_fit;
-	const char *bg_glyph; /* base glyph (SOLID) / repeating cell(s) (PATTERN) */
+	const char *
+		bg_glyph; /* base glyph (SOLID) / repeating cell(s) (PATTERN) */
 } VpTheme;
 
 /* Apply a packed color to a plane's pen. */
@@ -305,16 +310,15 @@ typedef struct sb_line {
 	int cols;
 } sb_line;
 
-/* A decoded sixel image, composited as a notcurses pixel bitmap on its own
- * ncplane (a child of the owning window's content plane). Anchored to an
- * absolute scrollback row so it scrolls and persists with its text; the plane's
- * pixels are blitted once and only its position is updated as the view moves. */
+/* A decoded sixel image belonging to a window. The pixels live in a compositor
+ * graphic attached to the window's content layer; this struct only holds what
+ * the terminal emulator knows and the compositor does not - where in the
+ * scrollback the image is pinned. Anchoring to an absolute scrollback row is
+ * what makes an image scroll and persist with the text it was printed next to;
+ * sixel_sync translates that anchor into the current on-screen row each frame,
+ * and the compositor decides from there whether the bitmap is visible. */
 typedef struct vp_image {
-	struct ncvisual *visual; /* decoded pixels, retained so the plane can be
-				  * re-blitted whenever the image is on-screen */
-	struct ncplane
-		*plane; /* NCBLIT_PIXEL child of Window.content; exists only
-				* while the image is visible (NULL when hidden) */
+	vp_graphic *gfx; /* compositor-owned bitmap (owns the decoded pixels) */
 	int64_t abs_row; /* absolute scrollback anchor of the top-left cell */
 	int col; /* anchor column (content-relative) */
 	int cell_h, cell_w; /* footprint in cells */
@@ -331,8 +335,11 @@ typedef struct Window {
 	VTerm *vt;
 	VTermScreen *vts;
 
-	struct ncplane *frame; /* decoration plane (border + title bar) */
-	struct ncplane *content; /* inner terminal grid, child of frame */
+	/* Compositor layers: the decoration (border + title bar) and the inner
+	 * terminal grid that rides it as a sublayer. Moving, raising or hiding
+	 * the frame carries the content and any images with it. */
+	vp_layer *frame;
+	vp_layer *content;
 
 	/* geometry of the *frame* in screen cells */
 	int x, y, w, h;
@@ -344,8 +351,6 @@ typedef struct Window {
 	/* saved frame geometry for un-maximize */
 	int sx, sy, sw, sh;
 
-	bool dirty; /* content needs a re-sweep into the content plane */
-	bool frame_dirty; /* frame chrome needs a redraw (geometry/title/focus) */
 	bool dead; /* child exited; destroy after the current loop pass */
 
 	/* Accumulated screen-damage since the last vt_render, so the sweep can repaint
@@ -440,9 +445,8 @@ typedef struct Settings {
 	bool capturing; /* waiting for a keypress to assign to row `sel` */
 	int sel; /* selected row: 0..ACTION_COUNT-1, then the toggle */
 	int scroll; /* first visible row in the scrolling list */
-	bool dirty; /* panel needs a redraw */
-	struct ncplane *icon; /* desktop launcher (low z, above the background) */
-	struct ncplane *panel; /* the modal panel (created on open) */
+	vp_layer *icon; /* desktop launcher (VP_BAND_DESKTOP) */
+	vp_layer *panel; /* the modal panel (VP_BAND_MODAL; created on open) */
 	char status[128]; /* transient status/hint line */
 
 	/* In-app text entry (Appearance view): while `editing`, keystrokes build up
@@ -457,9 +461,7 @@ typedef struct Settings {
 
 typedef struct WM {
 	struct notcurses *nc;
-	struct ncplane *std; /* standard plane (background / desktop) */
-
-	bool pixel_ok; /* terminal supports pixel bitmaps (sixel/kitty) for graphics */
+	vp_comp *comp; /* the scene: owns every plane, the z-order and present */
 
 	Window **wins;
 	int nwins;
@@ -472,14 +474,13 @@ typedef struct WM {
 	unsigned scr_rows, scr_cols; /* screen dims in cells */
 
 	/* taskbar */
-	struct ncplane *taskbar;
-	bool taskbar_dirty;
+	vp_layer *taskbar;
 	int taskbar_scroll; /* index of first window shown when slots overflow */
 
-	/* Desktop exit launcher icons, bottom-right (low z, above the background).
-	 * Persist detaches the UI; Die also terminates the session daemon. */
-	struct ncplane *exit_icon;
-	struct ncplane *die_icon;
+	/* Desktop exit launcher icons, bottom-right. Persist detaches the UI;
+	 * Die also terminates the session daemon. */
+	vp_layer *exit_icon;
+	vp_layer *die_icon;
 
 	/* Bare Linux console vs. a GUI terminal emulator. On the console we own a
      * GPM connection directly and draw a software pointer; in a GUI terminal
@@ -490,7 +491,7 @@ typedef struct WM {
 
 	/* software mouse pointer - drawn only on the console, where the full-screen
      * repaint erases the cell-inverting pointer gpm would otherwise draw. */
-	struct ncplane *cursor;
+	vp_layer *pointer;
 	bool draw_cursor;
 	int mouse_y, mouse_x;
 
@@ -507,12 +508,12 @@ typedef struct WM {
 	int drag_ax; /* anchor: original right column (for left-edge resize) */
 	int drag_ay; /* anchor: original bottom row (for top-edge resize) */
 	vp_snapzone snap_preview; /* currently-shown snap outline */
-	struct ncplane *snap_plane;
+	vp_layer *snap_layer;
 
 	/* Desktop-icon drag (DRAG_ICON). drag_off_{x,y} hold the grab offset within
      * the tile; drag_icon_{y,x}0 are the tile's top-left at grab time, so a
      * release that didn't move it can be treated as a plain click instead. */
-	struct ncplane *drag_icon;
+	vp_layer *drag_icon;
 	int drag_icon_y0, drag_icon_x0;
 
 	/* Title-bar double-click tracking (double-click toggles maximize). */
@@ -522,30 +523,19 @@ typedef struct WM {
 	bool should_quit;
 	bool should_kill_session;
 
-	/* Set by mutations that change the display but don't go through a per-object
-     * dirty flag (plane moves: dragged icons, the snap-preview outline, a closed
-     * settings panel). wm_render skips the (expensive) notcurses_render entirely
-     * when nothing - including this - is dirty, so idle/hover frames are free. */
-	bool needs_render;
-
-	/* Last state actually applied to the display, for change detection in
-     * wm_render: the hardware text cursor and (console only) the software mouse
-     * pointer cell. Lets a bare hover with no visible effect skip rendering. */
-	bool cursor_on;
-	int cursor_y, cursor_x;
-	int ptr_y, ptr_x;
-
 	VpConfig config;
 	Settings settings;
 
 	/* Active theme (a value copy: preset + config overrides), and the desktop
 	 * background. For BG_IMAGE, bg_visual holds the decoded image (retained so it
-	 * re-blits cheaply on resize/theme change) and bg_planes are its pixel-bitmap
-	 * plane(s) - one for stretch/scale/center, several for a tiled background. */
+	 * re-blits cheaply on resize/theme change) and bg_layer is the backdrop-band
+	 * layer the blitted bitmap hangs off (as a sublayer, so one destroy takes the
+	 * whole background down). */
 	VpTheme theme;
 	struct ncvisual *bg_visual;
-	struct ncplane **bg_planes;
-	int bg_nplanes;
+	vp_layer *bg_layer;
+	vp_bg_mode
+		bg_mode; /* the mode actually in force (see background_apply) */
 
 	/* Persistent session connection. The daemon owns PTYs; the UI owns only
 	 * notcurses/libvterm views and talks to the daemon over this Unix socket. */
@@ -674,13 +664,14 @@ void vt_reply(Window *w, const char *bytes, size_t len);
 void sixel_accumulate(Window *w, const char *command, size_t commandlen,
 		      const char *str, size_t len, bool initial, bool final);
 
-/* Reposition every live image plane from its absolute anchor to the current
- * visible row (parking off-screen when not fully visible), and evict images that
- * have scrolled out of retained history. Call once per render sweep. */
-void sixel_reposition(Window *w);
+/* Re-anchor every image from its absolute scrollback row to the row it now
+ * occupies in the window's view, and evict images that have scrolled out of
+ * retained history. Whether a re-anchored image is actually drawn - clipping,
+ * occlusion, blitting - is the compositor's decision, not ours. Called from the
+ * content painter, before the grid sweep. */
+void sixel_sync(Window *w);
 
-/* Destroy every live image plane and reset the list (used on screen clear,
- * resize, and teardown). */
+/* Drop every image and its pixels (used on screen clear, resize, teardown). */
 void sixel_images_clear(Window *w);
 
 /* The inner app overwrote live-screen cells in [row0,row1) x [col0,col1) (a
@@ -689,18 +680,7 @@ void sixel_images_clear(Window *w);
  * pixels. Coordinates are live-screen rows/cols. */
 void sixel_damage(Window *w, int row0, int row1, int col0, int col1);
 
-/* Destroy the visible image planes but keep their visuals, so they re-blit on
- * the next reposition. Used when a window is minimized: its frame parks
- * off-screen, and a pixel bitmap dragged off-screen scrolls some terminals. */
-void sixel_planes_drop(Window *w);
-
-/* Bracket a scene change that can occlude other windows' bitmaps (move, raise,
- * restore): drop every window's planes before, re-blit them all after. See the
- * definitions in sixel.c for why the two halves are separate. */
-void sixel_drop_all(WM *wm);
-void sixel_reblit_all(WM *wm);
-
-/* Free all per-window sixel state: the accumulation buffer and image planes. */
+/* Free all per-window sixel state: the accumulation buffer and the images. */
 void sixel_window_free(Window *w);
 
 /* Answer an XTSMGRAPHICS probe (CSI ? Pi ; Pa ; Pv S): report sixel colour
@@ -716,7 +696,9 @@ Window *window_create(WM *wm, int x, int y, int w, int h);
 Window *window_create_attached(WM *wm, int id, int x, int y, int w, int h);
 void window_destroy(WM *wm, Window *win);
 void window_set_geometry(Window *win, int x, int y, int w, int h);
-void window_draw_frame(WM *wm, Window *win);
+/* Mark the window's chrome (and, with it, its content) for repaint. */
+void window_damage_frame(Window *win);
+void window_damage_content(Window *win, bool full);
 /* Recompute the title from the PTY's foreground process (running program, or
  * user@host:cwd for an idle shell). Returns true if the title changed. */
 bool window_refresh_title(Window *win);
@@ -837,10 +819,9 @@ bool settings_icon_hit(WM *wm, int y, int x);
 void settings_handle_key(WM *wm, const ncinput *ni);
 void settings_click(WM *wm, int btn, int y, int x);
 void settings_scroll(WM *wm, int dir);
-/* Redraw the panel if open and dirty (called from the WM render pass);
- * returns true if it actually drew. */
-bool settings_render(WM *wm);
-/* Destroy planes on shutdown. */
+/* Mark the modal panel for repaint (no-op when it isn't open). */
+void settings_damage(Settings *s);
+/* Destroy the compositor layers on shutdown. */
 void settings_teardown(WM *wm);
 
 /* Desktop "Exit" launcher icon (bottom-right; clicking it quits viewpoint). */
@@ -867,7 +848,8 @@ void gpm_teardown(WM *wm);
 
 void taskbar_create(WM *wm);
 void taskbar_reflow(WM *wm);
-void taskbar_draw(WM *wm);
+/* Mark the bar for repaint on the next frame. */
+void taskbar_damage(WM *wm);
 /* Handle a click at absolute (y,x) on the taskbar; returns true if consumed. */
 bool taskbar_click(WM *wm, int y, int x);
 /* Scroll the window slots by `delta` slots (clamped). Used by the horizontal

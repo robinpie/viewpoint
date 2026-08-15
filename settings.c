@@ -185,7 +185,7 @@ static void panel_geom(const WM *wm, int *y, int *x, int *h, int *w)
 
 static int viewport_rows(const WM *wm)
 {
-	int H = wm->settings.panel ? (int)ncplane_dim_y(wm->settings.panel) : 0;
+	int H = wm->settings.panel ? comp_layer_rect(wm->settings.panel).h : 0;
 	int v = H - PANEL_CHROME;
 	return v < 1 ? 1 : v;
 }
@@ -203,7 +203,6 @@ static int app_total_rows(void)
 {
 	return APP_FIXED_ROWS + vp_theme_field_count();
 }
-
 
 static void clamp_scroll_n(WM *wm, int n)
 {
@@ -263,29 +262,29 @@ static void settings_icon_geom(const WM *wm, int *y, int *x)
 	clamp_icon_pos(wm, ICON_H, ICON_W, y, x);
 }
 
+static void settings_icon_paint(struct ncplane *p, bool full, void *user);
+
 void settings_init(WM *wm)
 {
 	int iy, ix;
 	settings_icon_geom(wm, &iy, &ix);
-
-	ncplane_options o = { 0 };
-	o.y = iy;
-	o.x = ix;
-	o.rows = ICON_H;
-	o.cols = ICON_W;
-	wm->settings.icon = ncplane_create(wm->std, &o);
-	if (!wm->settings.icon) {
-		return;
-	}
-	settings_icon_redraw(wm);
+	vp_rect r = { iy, ix, ICON_H, ICON_W };
+	wm->settings.icon = comp_layer_new(wm->comp, VP_BAND_DESKTOP, r,
+					   settings_icon_paint, wm);
 }
 
+/* The launcher tiles repaint from the live theme, so recolouring them is just a
+ * damage - there is no separate "redraw now" path that could disagree with what
+ * the compositor last put on screen. */
 void settings_icon_redraw(WM *wm)
 {
-	struct ncplane *p = wm->settings.icon;
-	if (!p) {
-		return;
-	}
+	comp_layer_damage(wm->settings.icon);
+}
+
+static void settings_icon_paint(struct ncplane *p, bool full, void *user)
+{
+	(void)full;
+	WM *wm = user;
 
 	uint64_t base = 0;
 	vp_rgb fg = wm->theme.icon_fg, bg = wm->theme.icon_bg;
@@ -325,20 +324,23 @@ void settings_icon_reflow(WM *wm)
 	}
 	int iy, ix;
 	settings_icon_geom(wm, &iy, &ix);
-	ncplane_move_yx(wm->settings.icon, iy, ix);
+	comp_layer_move(wm->settings.icon, iy, ix);
+}
+
+/* Hit tests read the compositor's geometry rather than the plane's, so they stay
+ * correct for a layer that is currently hidden or mid-drag. */
+static bool layer_hit(const vp_layer *l, int y, int x)
+{
+	if (!l) {
+		return false;
+	}
+	vp_rect r = comp_layer_abs(l);
+	return y >= r.y && y < r.y + r.h && x >= r.x && x < r.x + r.w;
 }
 
 bool settings_icon_hit(WM *wm, int y, int x)
 {
-	struct ncplane *p = wm->settings.icon;
-	if (!p) {
-		return false;
-	}
-	int ay, ax;
-	ncplane_abs_yx(p, &ay, &ax);
-	unsigned r, c;
-	ncplane_dim_yx(p, &r, &c);
-	return y >= ay && y < ay + (int)r && x >= ax && x < ax + (int)c;
+	return layer_hit(wm->settings.icon, y, x);
 }
 
 /* Siblings of the Settings tile, anchored to the bottom-right corner just above
@@ -356,7 +358,8 @@ static void exit_icon_geom(const WM *wm, int *y, int *x)
 		*x = wm->config.exit_icon_x;
 	} else {
 		int bottom = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
-		*y = bottom - EXIT_H - 1; /* leave a blank row between the icon and taskbar */
+		*y = bottom - EXIT_H -
+		     1; /* leave a blank row between the icon and taskbar */
 		*x = (int)wm->scr_cols - EXIT_W - 1;
 	}
 	clamp_icon_pos(wm, EXIT_H, EXIT_W, y, x);
@@ -457,39 +460,42 @@ static void draw_exit_tile(WM *wm, struct ncplane *p, const char *glyph,
 	ncplane_putstr_yx(p, 2, (EXIT_W - (int)strlen(label)) / 2, label);
 }
 
+/* Painters for the two exit tiles: same tile, different glyph and label. */
+static void exit_icon_paint(struct ncplane *p, bool full, void *user)
+{
+	(void)full;
+	draw_exit_tile(user, p, "⏻", "Persist");
+}
+
+static void die_icon_paint(struct ncplane *p, bool full, void *user)
+{
+	(void)full;
+	draw_exit_tile(user, p, "×", "Die");
+}
+
 void exit_icon_init(WM *wm)
 {
 	int iy, ix;
 	exit_icon_geom(wm, &iy, &ix);
-
-	ncplane_options o = { 0 };
-	o.y = iy;
-	o.x = ix;
-	o.rows = EXIT_H;
-	o.cols = EXIT_W;
-	wm->exit_icon = ncplane_create(wm->std, &o);
-	if (!wm->exit_icon) {
-		return;
-	}
-	exit_icon_redraw(wm);
+	vp_rect r = { iy, ix, EXIT_H, EXIT_W };
+	wm->exit_icon = comp_layer_new(wm->comp, VP_BAND_DESKTOP, r,
+				       exit_icon_paint, wm);
 
 	die_icon_geom(wm, &iy, &ix);
-	o.y = iy;
-	o.x = ix;
-	wm->die_icon = ncplane_create(wm->std, &o);
-	if (wm->die_icon) {
-		die_icon_redraw(wm);
-	}
+	r.y = iy;
+	r.x = ix;
+	wm->die_icon = comp_layer_new(wm->comp, VP_BAND_DESKTOP, r,
+				      die_icon_paint, wm);
 }
 
 void exit_icon_redraw(WM *wm)
 {
-	draw_exit_tile(wm, wm->exit_icon, "⏻", "Persist");
+	comp_layer_damage(wm->exit_icon);
 }
 
 void die_icon_redraw(WM *wm)
 {
-	draw_exit_tile(wm, wm->die_icon, "×", "Die");
+	comp_layer_damage(wm->die_icon);
 }
 
 void exit_icon_reflow(WM *wm)
@@ -499,7 +505,7 @@ void exit_icon_reflow(WM *wm)
 	}
 	int iy, ix;
 	exit_icon_geom(wm, &iy, &ix);
-	ncplane_move_yx(wm->exit_icon, iy, ix);
+	comp_layer_move(wm->exit_icon, iy, ix);
 }
 
 void die_icon_reflow(WM *wm)
@@ -509,46 +515,28 @@ void die_icon_reflow(WM *wm)
 	}
 	int iy, ix;
 	die_icon_geom(wm, &iy, &ix);
-	ncplane_move_yx(wm->die_icon, iy, ix);
+	comp_layer_move(wm->die_icon, iy, ix);
 }
 
 bool exit_icon_hit(WM *wm, int y, int x)
 {
-	struct ncplane *p = wm->exit_icon;
-	if (!p) {
-		return false;
-	}
-	int ay, ax;
-	ncplane_abs_yx(p, &ay, &ax);
-	unsigned r, c;
-	ncplane_dim_yx(p, &r, &c);
-	return y >= ay && y < ay + (int)r && x >= ax && x < ax + (int)c;
+	return layer_hit(wm->exit_icon, y, x);
 }
 
 bool die_icon_hit(WM *wm, int y, int x)
 {
-	struct ncplane *p = wm->die_icon;
-	if (!p) {
-		return false;
-	}
-	int ay, ax;
-	ncplane_abs_yx(p, &ay, &ax);
-	unsigned r, c;
-	ncplane_dim_yx(p, &r, &c);
-	return y >= ay && y < ay + (int)r && x >= ax && x < ax + (int)c;
+	return layer_hit(wm->die_icon, y, x);
 }
 
 void exit_icon_teardown(WM *wm)
 {
-	if (wm->exit_icon) {
-		ncplane_destroy(wm->exit_icon);
-		wm->exit_icon = NULL;
-	}
-	if (wm->die_icon) {
-		ncplane_destroy(wm->die_icon);
-		wm->die_icon = NULL;
-	}
+	comp_layer_destroy(wm->exit_icon);
+	wm->exit_icon = NULL;
+	comp_layer_destroy(wm->die_icon);
+	wm->die_icon = NULL;
 }
+
+static void panel_paint(struct ncplane *p, bool full, void *user);
 
 void settings_open(WM *wm)
 {
@@ -560,22 +548,13 @@ void settings_open(WM *wm)
 	int py, px, H, W;
 	panel_geom(wm, &py, &px, &H, &W);
 
-	ncplane_options o = { 0 };
-	o.y = py;
-	o.x = px;
-	o.rows = (unsigned)H;
-	o.cols = (unsigned)W;
-	s->panel = ncplane_create(wm->std, &o);
+	/* VP_BAND_MODAL is above every window and above the taskbar, which is
+	 * the whole of what "modal" means to the display. */
+	vp_rect r = { py, px, H, W };
+	s->panel = comp_layer_new(wm->comp, VP_BAND_MODAL, r, panel_paint, wm);
 	if (!s->panel) {
 		return;
 	}
-	uint64_t base = 0;
-	vp_rgb pfg = wm->theme.panel_fg, pbg = wm->theme.panel_bg;
-	ncchannels_set_fg_rgb8(&base, (pfg >> 16) & 0xff, (pfg >> 8) & 0xff,
-			       pfg & 0xff);
-	ncchannels_set_bg_rgb8(&base, (pbg >> 16) & 0xff, (pbg >> 8) & 0xff,
-			       pbg & 0xff);
-	ncplane_set_base(s->panel, " ", 0, base);
 
 	s->open = true;
 	s->view = SETTINGS_VIEW_GRID;
@@ -583,11 +562,14 @@ void settings_open(WM *wm)
 	s->capturing = false;
 	s->sel = 0;
 	s->scroll = 0;
-	s->dirty = true;
 	snprintf(s->status, sizeof(s->status),
 		 "↑/↓/←/→: select   Enter: open   Esc: close");
-	ncplane_move_top(s->panel);
 	vp_log("settings: open\n");
+}
+
+void settings_damage(Settings *s)
+{
+	comp_layer_damage(s->panel);
 }
 
 /* Switch the panel to a sub-view (or back to the grid), seeding its UI state. */
@@ -597,7 +579,7 @@ static void settings_set_view(WM *wm, settings_view v)
 	s->view = v;
 	s->capturing = false;
 	s->editing = false;
-	s->dirty = true;
+	settings_damage(s);
 	if (v == SETTINGS_VIEW_KEYBINDINGS) {
 		s->sel = 0;
 		s->scroll = 0;
@@ -639,11 +621,8 @@ void settings_close(WM *wm)
 	s->open = false;
 	s->capturing = false;
 	s->editing = false;
-	if (s->panel) {
-		ncplane_destroy(s->panel);
-		s->panel = NULL;
-	}
-	wm->needs_render = true;
+	comp_layer_destroy(s->panel);
+	s->panel = NULL;
 	config_save(&wm->config);
 	vp_log("settings: close (saved)\n");
 }
@@ -651,14 +630,10 @@ void settings_close(WM *wm)
 void settings_teardown(WM *wm)
 {
 	Settings *s = &wm->settings;
-	if (s->panel) {
-		ncplane_destroy(s->panel);
-		s->panel = NULL;
-	}
-	if (s->icon) {
-		ncplane_destroy(s->icon);
-		s->icon = NULL;
-	}
+	comp_layer_destroy(s->panel);
+	s->panel = NULL;
+	comp_layer_destroy(s->icon);
+	s->icon = NULL;
 }
 
 static void apply_capture(WM *wm, uint32_t id, unsigned mods)
@@ -696,7 +671,7 @@ static void apply_capture(WM *wm, uint32_t id, unsigned mods)
 		}
 	}
 	s->capturing = false;
-	s->dirty = true;
+	settings_damage(s);
 }
 
 static void do_unbind(WM *wm)
@@ -720,7 +695,7 @@ static void do_unbind(WM *wm)
 				 label ? label : "");
 		}
 	}
-	s->dirty = true;
+	settings_damage(s);
 }
 
 /* Push the live scrollback cap to every open window, trimming history to fit. */
@@ -765,7 +740,7 @@ static void term_adjust(WM *wm, int row, int dir)
 		snprintf(s->status, sizeof(s->status), "%s = %d", tr->label,
 			 *field);
 	}
-	s->dirty = true;
+	settings_damage(s);
 }
 
 static void grid_move(WM *wm, int drow, int dcol)
@@ -782,7 +757,7 @@ static void grid_move(WM *wm, int drow, int dcol)
 	int idx = row * GRID_COLS + col;
 	if (idx >= 0 && idx < GRID_ENTRY_COUNT) {
 		s->grid_sel = idx;
-		s->dirty = true;
+		settings_damage(s);
 	}
 }
 
@@ -825,13 +800,13 @@ static void settings_terminal_key(WM *wm, const ncinput *ni)
 	case NCKEY_UP:
 		if (s->sel > 0) {
 			s->sel--;
-			s->dirty = true;
+			settings_damage(s);
 		}
 		break;
 	case NCKEY_DOWN:
 		if (s->sel < TERM_ROWS - 1) {
 			s->sel++;
-			s->dirty = true;
+			settings_damage(s);
 		}
 		break;
 	case NCKEY_LEFT:
@@ -850,7 +825,7 @@ static void settings_terminal_key(WM *wm, const ncinput *ni)
 			 config_save(&wm->config) ?
 				 "Saved" :
 				 "Save failed (see VP_DEBUG)");
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case NCKEY_ESC:
 	case 'q':
@@ -914,7 +889,7 @@ static void appearance_applied(WM *wm, vp_setting setting, const char *what)
 	}
 	theme_apply(wm);
 	snprintf(s->status, sizeof(s->status), "%s", what);
-	s->dirty = true;
+	settings_damage(s);
 }
 
 static void appearance_cycle_theme(WM *wm, int dir)
@@ -982,10 +957,12 @@ static void appearance_edit_start(WM *wm, int kind, int color_idx,
 	s->edit_color_idx = color_idx;
 	snprintf(s->input, sizeof(s->input), "%s", initial ? initial : "");
 	s->input_len = (int)strlen(s->input);
-	snprintf(s->status, sizeof(s->status),
-		 kind == 0 ? "Type an image path · Enter: apply · Esc: cancel" :
-			     "Type a hex color (RRGGBB) · Enter: apply · Esc: cancel");
-	s->dirty = true;
+	snprintf(
+		s->status, sizeof(s->status),
+		kind == 0 ?
+			"Type an image path · Enter: apply · Esc: cancel" :
+			"Type a hex color (RRGGBB) · Enter: apply · Esc: cancel");
+	settings_damage(s);
 }
 
 static void appearance_edit_commit(WM *wm)
@@ -994,17 +971,18 @@ static void appearance_edit_commit(WM *wm)
 	s->editing = false;
 	if (s->edit_kind == 0) {
 		free(wm->config.bg_image_path);
-		wm->config.bg_image_path =
-			s->input[0] ? strdup(s->input) : NULL;
+		wm->config.bg_image_path = s->input[0] ? strdup(s->input) :
+							 NULL;
 		if (s->input[0]) {
 			wm->config.bg_mode = BG_IMAGE;
 		}
 		appearance_applied(wm, SETTING_BACKGROUND,
 				   s->input[0] ? "Background image set" :
 						 "Background image cleared");
-		if (s->input[0] && !wm->pixel_ok) {
-			snprintf(s->status, sizeof(s->status),
-				 "Image set, but this terminal has no pixel support");
+		if (s->input[0] && !comp_graphics_ok(wm->comp)) {
+			snprintf(
+				s->status, sizeof(s->status),
+				"Image set, but this terminal has no pixel support");
 		}
 	} else {
 		const char *t = s->input;
@@ -1016,7 +994,7 @@ static void appearance_edit_commit(WM *wm)
 		if (end == t || *end != '\0' || v > 0xffffffUL) {
 			snprintf(s->status, sizeof(s->status),
 				 "Bad hex color '%.32s'", s->input);
-			s->dirty = true;
+			settings_damage(s);
 			return;
 		}
 		config_set_color_override(&wm->config, s->edit_color_idx,
@@ -1024,7 +1002,7 @@ static void appearance_edit_commit(WM *wm)
 		config_manual_override_color(&wm->config, s->edit_color_idx);
 		appearance_applied(wm, SETTING_COLORS, "Color set");
 	}
-	s->dirty = true;
+	settings_damage(s);
 }
 
 static void appearance_edit_key(WM *wm, const ncinput *ni)
@@ -1033,7 +1011,7 @@ static void appearance_edit_key(WM *wm, const ncinput *ni)
 	if (ni->id == NCKEY_ESC) {
 		s->editing = false;
 		snprintf(s->status, sizeof(s->status), "Edit cancelled");
-		s->dirty = true;
+		settings_damage(s);
 		return;
 	}
 	if (ni->id == NCKEY_ENTER) {
@@ -1043,7 +1021,7 @@ static void appearance_edit_key(WM *wm, const ncinput *ni)
 	if (ni->id == NCKEY_BACKSPACE) {
 		if (s->input_len > 0) {
 			s->input[--s->input_len] = '\0';
-			s->dirty = true;
+			settings_damage(s);
 		}
 		return;
 	}
@@ -1051,7 +1029,7 @@ static void appearance_edit_key(WM *wm, const ncinput *ni)
 	    s->input_len < (int)sizeof(s->input) - 1) {
 		s->input[s->input_len++] = (char)ni->id;
 		s->input[s->input_len] = '\0';
-		s->dirty = true;
+		settings_damage(s);
 	}
 }
 
@@ -1121,32 +1099,32 @@ static void settings_appearance_key(WM *wm, const ncinput *ni)
 	case NCKEY_UP:
 		s->sel--;
 		clamp_scroll_n(wm, app_total_rows());
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case NCKEY_DOWN:
 		s->sel++;
 		clamp_scroll_n(wm, app_total_rows());
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case NCKEY_PGUP:
 		s->sel -= viewport_rows(wm);
 		clamp_scroll_n(wm, app_total_rows());
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case NCKEY_PGDOWN:
 		s->sel += viewport_rows(wm);
 		clamp_scroll_n(wm, app_total_rows());
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case NCKEY_HOME:
 		s->sel = 0;
 		clamp_scroll_n(wm, app_total_rows());
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case NCKEY_END:
 		s->sel = app_total_rows() - 1;
 		clamp_scroll_n(wm, app_total_rows());
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case NCKEY_LEFT:
 		appearance_adjust(wm, -1);
@@ -1168,7 +1146,7 @@ static void settings_appearance_key(WM *wm, const ncinput *ni)
 			 config_save(&wm->config) ?
 				 "Saved" :
 				 "Save failed (see VP_DEBUG)");
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case NCKEY_ESC:
 	case 'q':
@@ -1205,7 +1183,7 @@ void settings_handle_key(WM *wm, const ncinput *ni)
 			s->capturing = false;
 			snprintf(s->status, sizeof(s->status),
 				 "Rebind cancelled");
-			s->dirty = true;
+			settings_damage(s);
 			return;
 		}
 		uint32_t id;
@@ -1221,39 +1199,39 @@ void settings_handle_key(WM *wm, const ncinput *ni)
 	case NCKEY_UP:
 		s->sel--;
 		clamp_scroll(wm);
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case NCKEY_DOWN:
 		s->sel++;
 		clamp_scroll(wm);
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case NCKEY_PGUP:
 		s->sel -= viewport_rows(wm);
 		clamp_scroll(wm);
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case NCKEY_PGDOWN:
 		s->sel += viewport_rows(wm);
 		clamp_scroll(wm);
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case NCKEY_HOME:
 		s->sel = 0;
 		clamp_scroll(wm);
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case NCKEY_END:
 		s->sel = total_rows() - 1;
 		clamp_scroll(wm);
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case NCKEY_ENTER:
 	case ' ':
 		s->capturing = true;
 		snprintf(s->status, sizeof(s->status),
 			 "Press a key chord…  (Esc cancels)");
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case 'd':
 	case 'D':
@@ -1267,7 +1245,7 @@ void settings_handle_key(WM *wm, const ncinput *ni)
 			 config_save(&wm->config) ?
 				 "Saved" :
 				 "Save failed (see VP_DEBUG)");
-		s->dirty = true;
+		settings_damage(s);
 		break;
 	case NCKEY_ESC:
 	case 'q':
@@ -1285,13 +1263,11 @@ void settings_click(WM *wm, int btn, int y, int x)
 	if (!s->open || btn != 1) {
 		return;
 	}
-	int ay, ax;
-	ncplane_abs_yx(s->panel, &ay, &ax);
-	unsigned ph, pw;
-	ncplane_dim_yx(s->panel, &ph, &pw);
+	vp_rect pr = comp_layer_abs(s->panel);
+	int ay = pr.y, ax = pr.x;
 
 	/* Click outside the panel acts like Esc: step back one level (grid → close). */
-	if (y < ay || y >= ay + (int)ph || x < ax || x >= ax + (int)pw) {
+	if (y < ay || y >= ay + pr.h || x < ax || x >= ax + pr.w) {
 		settings_back(wm);
 		return;
 	}
@@ -1317,7 +1293,7 @@ void settings_click(WM *wm, int btn, int y, int x)
 		int listrow = rely - 1; /* row 0 is the top border */
 		if (listrow >= 0 && listrow < TERM_ROWS) {
 			s->sel = listrow;
-			s->dirty = true;
+			settings_damage(s);
 		}
 		return;
 	}
@@ -1331,7 +1307,7 @@ void settings_click(WM *wm, int btn, int y, int x)
 			int row = s->scroll + listrow;
 			if (row >= 0 && row < app_total_rows()) {
 				s->sel = row;
-				s->dirty = true;
+				settings_damage(s);
 			}
 		}
 		return;
@@ -1345,7 +1321,7 @@ void settings_click(WM *wm, int btn, int y, int x)
 			s->capturing = true;
 			snprintf(s->status, sizeof(s->status),
 				 "Press a key chord…  (Esc cancels)");
-			s->dirty = true;
+			settings_damage(s);
 		}
 	}
 }
@@ -1367,7 +1343,7 @@ void settings_scroll(WM *wm, int dir)
 		}
 		s->sel += dir;
 		clamp_scroll_n(wm, app_total_rows());
-		s->dirty = true;
+		settings_damage(s);
 		return;
 	}
 	if (s->view != SETTINGS_VIEW_KEYBINDINGS) {
@@ -1375,7 +1351,7 @@ void settings_scroll(WM *wm, int dir)
 	}
 	s->sel += dir;
 	clamp_scroll(wm);
-	s->dirty = true;
+	settings_damage(s);
 }
 
 static void draw_border(WM *wm, struct ncplane *p, int W, int H,
@@ -1522,7 +1498,8 @@ static void draw_row(WM *wm, struct ncplane *p, int prow, int W,
 	ncplane_putstr_yx(p, prow, 2, lbuf);
 
 	if (!selected) {
-		vp_setfg(p, wm->theme.panel_accent); /* dim accent for the chord */
+		vp_setfg(p,
+			 wm->theme.panel_accent); /* dim accent for the chord */
 	}
 	ncplane_putstr_yx(p, prow, chord_x, shown);
 }
@@ -1702,21 +1679,27 @@ static void draw_appearance(WM *wm, struct ncplane *p, int W, int H)
 	ncplane_putstr_yx(p, H - 2, 2, hbuf);
 }
 
-bool settings_render(WM *wm)
+/* Painter for the modal panel. Geometry is re-derived here so a screen resize or
+ * a view switch that changes the panel's size is handled by the same damage that
+ * asks for the redraw. */
+static void panel_paint(struct ncplane *p, bool full, void *user)
 {
+	(void)full;
+	WM *wm = user;
 	Settings *s = &wm->settings;
-	if (!s->open || !s->panel || !s->dirty) {
-		return false;
-	}
-	struct ncplane *p = s->panel;
 
-	/* Track screen resizes and view switches: re-center and re-size to fit. */
 	int py, px, H, W;
 	panel_geom(wm, &py, &px, &H, &W);
-	if (H != (int)ncplane_dim_y(p) || W != (int)ncplane_dim_x(p)) {
-		ncplane_resize_simple(p, (unsigned)H, (unsigned)W);
-	}
-	ncplane_move_yx(p, py, px);
+	comp_layer_resize(s->panel, H, W);
+	comp_layer_move(s->panel, py, px);
+
+	uint64_t base = 0;
+	vp_rgb pfg = wm->theme.panel_fg, pbg = wm->theme.panel_bg;
+	ncchannels_set_fg_rgb8(&base, (pfg >> 16) & 0xff, (pfg >> 8) & 0xff,
+			       pfg & 0xff);
+	ncchannels_set_bg_rgb8(&base, (pbg >> 16) & 0xff, (pbg >> 8) & 0xff,
+			       pbg & 0xff);
+	ncplane_set_base(p, " ", 0, base);
 
 	if (s->view == SETTINGS_VIEW_GRID) {
 		draw_grid(wm, p, W, H);
@@ -1727,8 +1710,4 @@ bool settings_render(WM *wm)
 	} else {
 		draw_keybindings(wm, p, W, H);
 	}
-
-	ncplane_move_top(p);
-	s->dirty = false;
-	return true;
 }

@@ -140,6 +140,11 @@ int main(int argc, char **argv)
 
 	WM wm;
 	wm_init(&wm, nc);
+	if (!wm.comp) {
+		notcurses_stop(nc);
+		fprintf(stderr, "viewpoint: failed to create the compositor\n");
+		return 1;
+	}
 	if (!session_connect(&wm)) {
 		notcurses_stop(nc);
 		fprintf(stderr, "viewpoint: failed to connect to session daemon\n");
@@ -301,6 +306,8 @@ int main(int argc, char **argv)
 	exit_icon_teardown(&wm);
 	settings_teardown(&wm);
 	background_free(&wm);
+	comp_destroy(wm.comp); /* whatever is left: the pointer, stray layers */
+	wm.comp = NULL;
 	config_free(&wm.config);
 	gpm_teardown(&wm);
 	/* Undo the motion-tracking modes we re-asserted (notcurses_stop resets the

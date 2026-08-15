@@ -331,8 +331,8 @@ void session_drain(WM *wm)
 			if (win && strcmp(win->title, title) != 0) {
 				snprintf(win->title, sizeof(win->title), "%s",
 					 title);
-				win->frame_dirty = true;
-				wm->taskbar_dirty = true;
+				window_damage_frame(win);
+				taskbar_damage(wm);
 			}
 		} else {
 			client_drop(wm);

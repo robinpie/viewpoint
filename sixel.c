@@ -19,13 +19,17 @@
  *
  * notcurses owns the screen, so we cannot pass raw sixel bytes through to the
  * host terminal. Instead the libvterm DCS fallback (in vt_bridge.c) hands us the
- * sixel payload, we decode it with libsixel, and composite the result as a
- * notcurses pixel bitmap (NCBLIT_PIXEL) on a dedicated child plane of the
- * window's content plane.
+ * sixel payload and we decode it with libsixel; the decoded pixels are handed to
+ * the compositor as a graphic attached to the window's content layer.
  *
- * Each image is anchored to an absolute scrollback row (Window.scroll_base) so
- * it scrolls and persists with its text: the pixels are blitted once and only
- * the plane's position is updated as the view moves (sixel_reposition).
+ * What is left here is only what the terminal emulator knows and the compositor
+ * does not: where an image belongs in the scrollback. Each image is anchored to
+ * an absolute scrollback row (Window.scroll_base) so it scrolls and persists
+ * with its text, and sixel_sync resolves those anchors to view-relative rows.
+ * Everything after that - whether a bitmap is on screen, clipped, occluded by
+ * another window, or has to be re-emitted because the stack moved - is the
+ * compositor's problem, and is no longer duplicated (differently, and wrongly)
+ * at each call site that happened to move a window.
  */
 #define _GNU_SOURCE
 #include "viewpoint.h"
@@ -133,37 +137,17 @@ static uint32_t *sixel_to_rgba(const unsigned char *bytes, int len, int *out_w,
 /* Image list                                                                */
 /* ------------------------------------------------------------------------- */
 
-/* Swap-remove image i, destroying its plane. */
-/* Tear down an image's notcurses resources: the (optional) visible plane and the
- * retained visual. */
-static void image_free(vp_image *img)
-{
-	if (img->plane) {
-		ncplane_destroy(img->plane);
-		img->plane = NULL;
-	}
-	if (img->visual) {
-		ncvisual_destroy(img->visual);
-		img->visual = NULL;
-	}
-}
-
+/* Swap-remove image i, releasing its pixels. */
 static void image_drop(Window *w, int i)
 {
-	image_free(&w->images[i]);
+	comp_graphic_remove(w->images[i].gfx);
 	w->images[i] = w->images[--w->nimages];
-	if (w->wm) {
-		w->wm->needs_render = true;
-	}
 }
 
 void sixel_images_clear(Window *w)
 {
 	for (int i = 0; i < w->nimages; i++) {
-		image_free(&w->images[i]);
-	}
-	if (w->nimages && w->wm) {
-		w->wm->needs_render = true;
+		comp_graphic_remove(w->images[i].gfx);
 	}
 	w->nimages = 0;
 }
@@ -184,57 +168,11 @@ void sixel_damage(Window *w, int row0, int row1, int col0, int col1)
 		bool col_hit =
 			img->col < col1 && col0 < img->col + img->cell_w;
 		if (row_hit && col_hit) {
-			image_drop(w, i); /* compacts the list; don't advance i */
+			image_drop(w,
+				   i); /* compacts the list; don't advance i */
 			continue;
 		}
 		i++;
-	}
-}
-
-void sixel_planes_drop(Window *w)
-{
-	bool any = false;
-	for (int i = 0; i < w->nimages; i++) {
-		if (w->images[i].plane) {
-			ncplane_destroy(w->images[i].plane);
-			w->images[i].plane = NULL;
-			any = true;
-		}
-	}
-	if (any && w->wm) {
-		w->wm->needs_render = true;
-	}
-}
-
-/* A scene change (a window moved, raised, restored, …) can corrupt *other*
- * windows' bitmaps: dragging or raising a window over an image occludes its
- * sprixel, and notcurses' damage diff doesn't reliably re-emit it afterwards.
- * These two halves bracket such a change: drop every window's planes first
- * (destroying each at its current location invalidates the right cells), then
- * after the change re-blit them all, repainting the content cells the bitmaps
- * had annihilated. Splitting drop from re-blit lets the move path drop *before*
- * it slides the frame, so the moving window's own old footprint is invalidated
- * too (its planes ride the frame, so dropping after the move would target the
- * new footprint and strand the old one). */
-void sixel_drop_all(WM *wm)
-{
-	for (int i = 0; i < wm->nwins; i++) {
-		Window *w = wm->wins[i];
-		if (!w->minimized && w->nimages > 0) {
-			sixel_planes_drop(w);
-		}
-	}
-}
-
-void sixel_reblit_all(WM *wm)
-{
-	for (int i = 0; i < wm->nwins; i++) {
-		Window *w = wm->wins[i];
-		if (!w->minimized && w->nimages > 0) {
-			w->dirty = true;
-			w->dmg_all = true;
-			sixel_reposition(w);
-		}
 	}
 }
 
@@ -257,8 +195,8 @@ void sixel_window_free(Window *w)
 static void sixel_emit(Window *w)
 {
 	WM *wm = w->wm;
-	if (!wm || !wm->pixel_ok || !w->content || w->six_overflow ||
-	    w->sixlen == 0) {
+	if (!wm || !comp_graphics_ok(wm->comp) || !w->content ||
+	    w->six_overflow || w->sixlen == 0) {
 		return;
 	}
 
@@ -274,19 +212,16 @@ static void sixel_emit(Window *w)
 	int currow = w->currow < 0 ? 0 : w->currow;
 	int curcol = w->curcol < 0 ? 0 : w->curcol;
 
-	/* Keep the decoded pixels in a visual so the image plane can be blitted and
-	 * destroyed repeatedly as it scrolls in and out of view, without ever
-	 * having to re-decode or move a bitmap off-screen. */
 	struct ncvisual *v = ncvisual_from_rgba(rgba, ih, iw * 4, iw);
 	free(rgba);
 	if (!v) {
 		return;
 	}
 
-	/* Footprint in cells, for the cursor advance and visibility tests. */
+	/* Footprint in cells, for the cursor advance and the anchor arithmetic. */
 	unsigned celldimy = 0, celldimx = 0;
-	ncplane_pixel_geom(w->content, NULL, NULL, &celldimy, &celldimx, NULL,
-			   NULL);
+	ncplane_pixel_geom(comp_layer_plane(w->content), NULL, NULL, &celldimy,
+			   &celldimx, NULL, NULL);
 	int cell_h = celldimy ? (ih + (int)celldimy - 1) / (int)celldimy : ih;
 	int cell_w = celldimx ? (iw + (int)celldimx - 1) / (int)celldimx : iw;
 
@@ -300,15 +235,22 @@ static void sixel_emit(Window *w)
 		w->images = na;
 		w->images_cap = cap;
 	}
+
+	/* Hand the pixels to the compositor, anchored where the cursor is now.
+	 * It retains them, so the bitmap can come and go as the view scrolls
+	 * without ever being re-decoded. */
+	vp_graphic *g =
+		comp_graphic_add(w->content, v, currow, curcol, cell_h, cell_w);
+	if (!g) {
+		return; /* comp_graphic_add consumed the visual */
+	}
 	vp_image *img = &w->images[w->nimages++];
-	img->visual = v;
-	img->plane = NULL; /* blitted lazily by sixel_reposition when visible */
+	img->gfx = g;
 	img->abs_row = w->scroll_base + currow;
 	img->col = curcol;
 	img->cell_h = cell_h;
 	img->cell_w = cell_w;
 
-	wm->needs_render = true;
 	vp_log("sixel id=%d %dx%dpx (%dx%d cells) row=%d col=%d\n", w->id, iw,
 	       ih, cell_w, cell_h, currow, curcol);
 
@@ -326,7 +268,7 @@ void sixel_accumulate(Window *w, const char *command, size_t commandlen,
 		      const char *str, size_t len, bool initial, bool final)
 {
 	/* No pixel support: consume and drop, never buffer. */
-	if (!w->wm || !w->wm->pixel_ok) {
+	if (!w->wm || !comp_graphics_ok(w->wm->comp)) {
 		return;
 	}
 	if (initial) {
@@ -360,11 +302,11 @@ void sixel_answer_xtsmgraphics(Window *w, const long *args, int argcount)
 		/* Maximum sixel image geometry in pixels: the largest bitmap the
 		 * content plane can show, falling back to its current pixel size. */
 		unsigned maxy = 0, maxx = 0;
-		ncplane_pixel_geom(w->content, NULL, NULL, NULL, NULL, &maxy,
-				   &maxx);
+		struct ncplane *cp = comp_layer_plane(w->content);
+		ncplane_pixel_geom(cp, NULL, NULL, NULL, NULL, &maxy, &maxx);
 		if (maxx == 0 || maxy == 0) {
-			ncplane_pixel_geom(w->content, &maxy, &maxx, NULL, NULL,
-					   NULL, NULL);
+			ncplane_pixel_geom(cp, &maxy, &maxx, NULL, NULL, NULL,
+					   NULL);
 		}
 		if (maxx == 0 || maxy == 0) {
 			return;
@@ -379,7 +321,16 @@ void sixel_answer_xtsmgraphics(Window *w, const long *args, int argcount)
 	(void)argcount;
 }
 
-void sixel_reposition(Window *w)
+/* Resolve every image's absolute scrollback anchor against the window's current
+ * view, and evict the ones that have scrolled out of retained history.
+ *
+ * That is the whole job now. Deciding whether a re-anchored bitmap is on screen
+ * - does it fit inside the window, has the window been dragged off an edge, is
+ * another window or the taskbar covering it, does it touch the last physical
+ * row - used to live here too, tangled together with blitting and with a
+ * separate "drop everything and start over" path for scene changes. It belongs
+ * to whoever knows the whole scene, so it moved to the compositor. */
+void sixel_sync(Window *w)
 {
 	if (w->nimages == 0) {
 		return;
@@ -389,73 +340,14 @@ void sixel_reposition(Window *w)
 	int64_t top_abs = w->scroll_base - w->sb_offset;
 	int64_t oldest = w->scroll_base - w->sb_count;
 
-	/* Absolute screen position of the content plane, so we can keep images off
-	 * the last physical row: a pixel bitmap rendered on the bottom row makes
-	 * many terminals scroll the whole screen up (dragging all of viewpoint with
-	 * it). scr_rows - 1 is the taskbar row, which covers the window anyway. */
-	int ay = 0, ax = 0;
-	ncplane_abs_yx(w->content, &ay, &ax);
-	int scr_rows = w->wm ? (int)w->wm->scr_rows : w->rows;
-	int scr_cols = w->wm ? (int)w->wm->scr_cols : w->cols;
-
 	for (int i = 0; i < w->nimages;) {
 		vp_image *img = &w->images[i];
 		if (img->abs_row + img->cell_h <= oldest) {
 			image_drop(w, i); /* scrolled out of retained history */
 			continue;
 		}
-		int r = (int)(img->abs_row - top_abs);
-		int top_screen = ay + r;
-		int bot_screen = ay + r + img->cell_h; /* exclusive */
-		int left_screen = ax + img->col;
-		int right_screen = ax + img->col + img->cell_w; /* exclusive */
-		/* Show only when the bitmap fits wholly inside the content cells and
-		 * inside the screen (off the last physical row). Planes aren't
-		 * scissored to the content plane, so a partial would spill over the
-		 * frame/taskbar; and a pixel bitmap placed off-screen makes some
-		 * terminals scroll the whole display. The column bounds matter as much
-		 * as the rows: img->col is relative to the content plane, so dragging
-		 * the window past the left screen edge pushes the bitmap to a negative
-		 * absolute x (off-screen) even though its content-relative column never
-		 * changes. So rather than move a hidden bitmap off-screen, we destroy
-		 * its plane and re-blit from the retained visual when it comes back
-		 * fully into view. */
-		bool visible = r >= 0 && r + img->cell_h <= w->rows &&
-			       img->col >= 0 && img->col + img->cell_w <= w->cols &&
-			       top_screen >= 0 && bot_screen < scr_rows &&
-			       left_screen >= 0 && right_screen <= scr_cols;
-		if (visible) {
-			if (img->plane) {
-				ncplane_move_yx(img->plane, r, img->col);
-			} else if (img->visual) {
-				struct ncvisual_options vopts = {
-					.n = w->content,
-					.y = r,
-					.x = img->col,
-					.scaling = NCSCALE_NONE,
-					.blitter = NCBLIT_PIXEL,
-					.flags = NCVISUAL_OPTION_CHILDPLANE,
-				};
-				img->plane = ncvisual_blit(w->wm->nc,
-							   img->visual, &vopts);
-				/* A newly created plane lands at the top of the
-				 * global z-order, not within its window's family
-				 * (binding governs geometry, not stacking). Left
-				 * there, a re-blitted image would float above
-				 * windows stacked over it. Anchor it just above
-				 * its own content plane so higher windows occlude
-				 * it and move_family_top keeps it with the frame. */
-				if (img->plane) {
-					ncplane_move_above(img->plane,
-							   w->content);
-				}
-				w->wm->needs_render = true;
-			}
-		} else if (img->plane) {
-			ncplane_destroy(img->plane);
-			img->plane = NULL;
-			w->wm->needs_render = true;
-		}
+		comp_graphic_move(img->gfx, (int)(img->abs_row - top_abs),
+				  img->col);
 		i++;
 	}
 }

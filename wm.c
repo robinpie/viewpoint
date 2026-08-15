@@ -15,11 +15,14 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* wm.c - window-manager core: the window list, focus, z-order/stacking,
- * layout (move/resize/min/max), spawning/closing, and the render pass.
+/* wm.c - window-manager core: the window list, focus, stacking policy,
+ * layout (move/resize/min/max), spawning/closing, and the per-frame update.
  *
- * notcurses' plane z-order is the source of truth for stacking; we raise the
- * focused window's frame (and its bound content) to the top.
+ * Stacking is expressed, not performed: a window is a layer in the compositor's
+ * VP_BAND_WINDOW band, focusing one raises it within that band, and the
+ * compositor works out what that means for the plane stack. Nothing here can
+ * put a window over the taskbar, and nothing here has to re-assert the taskbar's
+ * position afterwards.
  */
 #define _GNU_SOURCE
 #include "viewpoint.h"
@@ -28,23 +31,28 @@
 #include <stdlib.h>
 #include <string.h>
 
+static void desktop_paint(struct ncplane *p, bool full, void *user);
+static void pointer_paint(struct ncplane *p, bool full, void *user);
+
 void wm_init(WM *wm, struct notcurses *nc)
 {
 	memset(wm, 0, sizeof(*wm));
 	wm->nc = nc;
-	wm->std = notcurses_stdplane(nc);
 	wm->focused = -1;
 	wm->next_id = 1;
 	wm->mode = MODE_INTERPRET;
-	wm->needs_render = true;
-	wm->ptr_y = wm->ptr_x = -1; /* no software pointer placed yet */
-	/* Whether this terminal can render pixel bitmaps (sixel/kitty). Gates the
-     * whole sixel path; notcurses auto-detects the protocol, no init flag needed. */
-	int pximpl = notcurses_check_pixel_support(nc);
-	wm->pixel_ok = pximpl != NCPIXEL_NONE;
-	vp_log("pixel support: impl=%d pixel_ok=%d\n", pximpl, wm->pixel_ok);
+
+	wm->comp = comp_create(nc);
+	if (!wm->comp) {
+		return; /* main() checks for this and reports it */
+	}
+	vp_log("pixel support: graphics=%d\n", comp_graphics_ok(wm->comp));
 	config_load(&wm->config);
 	notcurses_stddim_yx(nc, &wm->scr_rows, &wm->scr_cols);
+
+	/* The desktop surface is the compositor's root layer; painting it is our
+	 * job, deciding when is not. */
+	comp_set_root_painter(wm->comp, desktop_paint, wm);
 
 	/* Resolve the configured theme into wm->theme and paint the desktop
 	 * background. Done before any chrome is created so everything reads the
@@ -59,45 +67,52 @@ void wm_init(WM *wm, struct notcurses *nc)
 	wm->console = term && strncmp(term, "linux", 5) == 0;
 	wm->draw_cursor = wm->console;
 	if (wm->draw_cursor) {
-		ncplane_options o = { 0 };
-		o.rows = 1;
-		o.cols = 1;
-		wm->cursor = ncplane_create(wm->std, &o);
-		if (wm->cursor) {
-			uint64_t cc = 0;
-			vp_rgb cf = wm->theme.cursor_fg, cb = wm->theme.cursor_bg;
-			ncchannels_set_fg_rgb8(&cc, (cf >> 16) & 0xff,
-					       (cf >> 8) & 0xff, cf & 0xff);
-			ncchannels_set_bg_rgb8(&cc, (cb >> 16) & 0xff,
-					       (cb >> 8) & 0xff, cb & 0xff);
-			/* A solid block is unambiguous and always present in console fonts. */
-			ncplane_set_channels(wm->cursor, cc);
-			ncplane_putstr_yx(wm->cursor, 0, 0, "█");
-			ncplane_move_top(wm->cursor);
-		} else {
-			wm->draw_cursor = false;
-		}
+		vp_rect r = { 0, 0, 1, 1 };
+		wm->pointer = comp_layer_new(wm->comp, VP_BAND_POINTER, r,
+					     pointer_paint, wm);
+		/* Deliberately not opaque. It covers one cell, and treating it
+		 * as covering would make any image it passed over be torn down
+		 * and re-blitted - a whole picture flickering to show a
+		 * one-cell pointer that the bitmap would hide anyway. */
+		comp_layer_set_opaque(wm->pointer, false);
+		wm->draw_cursor = wm->pointer != NULL;
 	}
+}
+
+/* The software mouse pointer: a solid block, unambiguous and present in every
+ * console font. Its band keeps it over everything without anyone re-raising it. */
+static void pointer_paint(struct ncplane *p, bool full, void *user)
+{
+	(void)full;
+	WM *wm = user;
+	uint64_t cc = 0;
+	vp_rgb cf = wm->theme.cursor_fg, cb = wm->theme.cursor_bg;
+	ncchannels_set_fg_rgb8(&cc, (cf >> 16) & 0xff, (cf >> 8) & 0xff,
+			       cf & 0xff);
+	ncchannels_set_bg_rgb8(&cc, (cb >> 16) & 0xff, (cb >> 8) & 0xff,
+			       cb & 0xff);
+	ncplane_set_channels(p, cc);
+	ncplane_putstr_yx(p, 0, 0, "█");
 }
 
 void wm_set_mouse_pos(WM *wm, int y, int x)
 {
 	wm->mouse_y = y;
 	wm->mouse_x = x;
+	if (wm->pointer) {
+		comp_layer_move(wm->pointer, y, x);
+	}
 }
 
-/* Drop the background image plane(s). Keeps the retained visual unless `visual`
- * is set (full teardown / forcing a re-decode). */
-static void bg_drop_planes(WM *wm, bool visual)
+/* Drop the background image layer. Keeps the retained visual unless `visual` is
+ * set (full teardown / forcing a re-decode). */
+static void bg_drop(WM *wm, bool visual)
 {
-	for (int i = 0; i < wm->bg_nplanes; i++) {
-		if (wm->bg_planes[i]) {
-			ncplane_destroy(wm->bg_planes[i]);
-		}
+	if (wm->bg_layer) {
+		comp_layer_destroy(
+			wm->bg_layer); /* takes the blitted sublayer */
+		wm->bg_layer = NULL;
 	}
-	free(wm->bg_planes);
-	wm->bg_planes = NULL;
-	wm->bg_nplanes = 0;
 	if (visual && wm->bg_visual) {
 		ncvisual_destroy(wm->bg_visual);
 		wm->bg_visual = NULL;
@@ -106,25 +121,7 @@ static void bg_drop_planes(WM *wm, bool visual)
 
 void background_free(WM *wm)
 {
-	bg_drop_planes(wm, true);
-}
-
-/* Track a background plane for later teardown (z-order is handled in one shot by
- * move_family_bottom on the container, so this doesn't restack). */
-static bool bg_track(WM *wm, struct ncplane *p)
-{
-	if (!p) {
-		return false;
-	}
-	struct ncplane **n = realloc(
-		wm->bg_planes, (size_t)(wm->bg_nplanes + 1) * sizeof(*n));
-	if (!n) {
-		ncplane_destroy(p);
-		return false;
-	}
-	wm->bg_planes = n;
-	wm->bg_planes[wm->bg_nplanes++] = p;
-	return true;
+	bg_drop(wm, true);
 }
 
 /* Expand a leading "~" / "~/" to $HOME (ncvisual_from_file won't). Returns
@@ -161,7 +158,8 @@ static struct ncplane *bg_blit(WM *wm, struct ncplane *parent, int y, int x,
  * desktop-sized bitmap behaves exactly like the stretch/scale modes. The buffer
  * is sized to the area in cells (ah*cdy x aw*cdx px), so it never reaches the
  * last physical row. Returns the plane (child of `area`), or NULL on failure. */
-static struct ncplane *bg_blit_tiled(WM *wm, struct ncplane *area, int ah, int aw)
+static struct ncplane *bg_blit_tiled(WM *wm, struct ncplane *area, int ah,
+				     int aw)
 {
 	ncvgeom g;
 	struct ncvisual_options probe = { .blitter = NCBLIT_PIXEL,
@@ -236,146 +234,145 @@ static void bg_center(struct ncplane *p, int bound_h, int bound_w)
 	ncplane_move_yx(p, (bound_h - (int)ph) / 2, (bound_w - (int)pw) / 2);
 }
 
-void background_apply(WM *wm)
+/* The background mode we can actually honour: an image needs pixel support and
+ * a loadable file, and falls back to a solid fill without them. Decoding is a
+ * side effect, so this is called once per background_apply and its result is
+ * cached for the desktop painter. */
+static vp_bg_mode bg_resolve_mode(WM *wm)
 {
-	bg_drop_planes(wm, false); /* keep any retained visual for re-blit */
-
 	vp_bg_mode mode = wm->theme.bg_mode;
-
-	/* An image background needs pixel support and a loadable file; otherwise
-	 * fall back to a solid fill in the theme's background colors. */
-	if (mode == BG_IMAGE && !wm->pixel_ok) {
-		mode = BG_SOLID;
+	if (mode != BG_IMAGE) {
+		return mode;
 	}
-	if (mode == BG_IMAGE) {
-		const char *path = wm->config.bg_image_path;
-		if (!path || !*path) {
-			mode = BG_SOLID;
-		} else {
-			if (!wm->bg_visual) {
-				char pbuf[1024];
-				const char *load =
-					expand_tilde(path, pbuf, sizeof(pbuf));
-				wm->bg_visual = ncvisual_from_file(load);
-				if (!wm->bg_visual) {
-					vp_log("background: cannot load image %s\n",
-					       load);
-				}
-			}
-			if (!wm->bg_visual) {
-				mode = BG_SOLID;
-			}
+	if (!comp_graphics_ok(wm->comp)) {
+		return BG_SOLID;
+	}
+	const char *path = wm->config.bg_image_path;
+	if (!path || !*path) {
+		return BG_SOLID;
+	}
+	if (!wm->bg_visual) {
+		char pbuf[1024];
+		const char *load = expand_tilde(path, pbuf, sizeof(pbuf));
+		wm->bg_visual = ncvisual_from_file(load);
+		if (!wm->bg_visual) {
+			vp_log("background: cannot load image %s\n", load);
 		}
 	}
+	return wm->bg_visual ? BG_IMAGE : BG_SOLID;
+}
 
-	/* Std base cell: the desktop glyph for SOLID, a blank in the background
-	 * color otherwise (so PATTERN gaps / IMAGE letterbox read as the theme bg). */
+/* Painter for the desktop surface itself (the compositor's root layer). The
+ * base cell carries the desktop glyph for SOLID and a blank in the background
+ * colour otherwise, so PATTERN gaps and IMAGE letterboxing read as the theme
+ * background. */
+static void desktop_paint(struct ncplane *p, bool full, void *user)
+{
+	(void)full;
+	WM *wm = user;
+	const char *glyph = (wm->theme.bg_glyph && *wm->theme.bg_glyph) ?
+				    wm->theme.bg_glyph :
+				    " ";
 	uint64_t ch = 0;
 	vp_rgb fg = wm->theme.bg_fg, bg = wm->theme.bg_bg;
 	ncchannels_set_fg_rgb8(&ch, (fg >> 16) & 0xff, (fg >> 8) & 0xff,
 			       fg & 0xff);
 	ncchannels_set_bg_rgb8(&ch, (bg >> 16) & 0xff, (bg >> 8) & 0xff,
 			       bg & 0xff);
-	const char *glyph = (wm->theme.bg_glyph && *wm->theme.bg_glyph) ?
-				    wm->theme.bg_glyph :
-				    " ";
-	ncplane_set_base(wm->std, mode == BG_SOLID ? glyph : " ", 0, ch);
-	ncplane_erase(wm->std); /* clear any glyphs a previous PATTERN painted */
+	ncplane_set_base(p, wm->bg_mode == BG_SOLID ? glyph : " ", 0, ch);
+	ncplane_erase(p); /* clear any glyphs a previous PATTERN painted */
 
-	if (mode == BG_PATTERN) {
-		vp_setfg(wm->std, wm->theme.bg_fg);
-		vp_setbg(wm->std, wm->theme.bg_bg);
-		for (int r = 0; r < (int)wm->scr_rows; r++) {
-			int c = 0;
-			while (c < (int)wm->scr_cols) {
-				int adv = ncplane_putstr_yx(wm->std, r, c, glyph);
-				if (adv <= 0) {
-					break;
-				}
-				c += adv;
-			}
-		}
-	} else if (mode == BG_IMAGE) {
-		/* Confine the image to the desktop area above the taskbar: pixel
-		 * bitmaps that reach the last physical row (or hang off an edge) make
-		 * some terminals scroll the whole display. The image planes are
-		 * children of `area`, so STRETCH/SCALE size to it (never the last row),
-		 * and CENTER/TILE only place tiles that fit fully inside it. */
-		int aw = (int)wm->scr_cols;
-		int ah = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
-		if (ah < 1) {
-			ah = (int)wm->scr_rows;
-		}
-		ncplane_options ao = { 0 };
-		ao.rows = (unsigned)ah;
-		ao.cols = (unsigned)aw;
-		struct ncplane *area = ncplane_create(wm->std, &ao);
-		if (area) {
-			uint64_t tb = 0;
-			ncchannels_set_fg_alpha(&tb, NCALPHA_TRANSPARENT);
-			ncchannels_set_bg_alpha(&tb, NCALPHA_TRANSPARENT);
-			ncplane_set_base(area, "", 0, tb);
-			bg_track(wm, area);
-
-			switch (wm->theme.bg_fit) {
-			case FIT_STRETCH:
-				bg_track(wm, bg_blit(wm, area, 0, 0,
-						     NCSCALE_STRETCH));
-				break;
-			case FIT_SCALE: {
-				struct ncplane *p =
-					bg_blit(wm, area, 0, 0, NCSCALE_SCALE);
-				if (p) {
-					bg_center(p, ah, aw);
-					bg_track(wm, p);
-				}
+	if (wm->bg_mode != BG_PATTERN) {
+		return;
+	}
+	vp_setfg(p, wm->theme.bg_fg);
+	vp_setbg(p, wm->theme.bg_bg);
+	for (int r = 0; r < (int)wm->scr_rows; r++) {
+		int c = 0;
+		while (c < (int)wm->scr_cols) {
+			int adv = ncplane_putstr_yx(p, r, c, glyph);
+			if (adv <= 0) {
 				break;
 			}
-			case FIT_CENTER: {
-				struct ncplane *p =
-					bg_blit(wm, area, 0, 0, NCSCALE_NONE);
-				if (p) {
-					unsigned ph, pw;
-					ncplane_dim_yx(p, &ph, &pw);
-					if ((int)ph > ah || (int)pw > aw) {
-						/* Too big to center without spilling onto the
-						 * taskbar row: fit it instead. */
-						ncplane_destroy(p);
-						p = bg_blit(wm, area, 0, 0,
-							    NCSCALE_SCALE);
-					}
-					if (p) {
-						bg_center(p, ah, aw);
-						bg_track(wm, p);
-					}
-				}
-				break;
-			}
-			case FIT_TILE: {
-				/* One desktop-sized bitmap of the tiled image,
-				 * edge to edge (Windows-style). */
-				struct ncplane *p =
-					bg_blit_tiled(wm, area, ah, aw);
-				if (!p) {
-					/* Couldn't compose: stretch one copy. */
-					p = bg_blit(wm, area, 0, 0,
-						    NCSCALE_STRETCH);
-				}
-				bg_track(wm, p);
-				break;
-			}
-			}
-			/* Sink the image family to the bottom, then drop std
-			 * beneath it: move_family_bottom alone would place the
-			 * image *below* std, whose opaque base cell would then
-			 * paint over the whole image. Final order (bottom→top):
-			 * std base, image, windows, taskbar, panel. */
-			ncplane_move_family_bottom(area);
-			ncplane_move_bottom(wm->std);
+			c += adv;
 		}
 	}
+}
 
-	wm->needs_render = true;
+/* (Re)build the desktop background. For BG_IMAGE this creates one backdrop-band
+ * layer covering the desktop area with the blitted bitmap hanging off it as a
+ * sublayer, so a single destroy takes the whole thing down and the band alone
+ * guarantees it stays under every window - no move_family_bottom, and no
+ * shuffling the standard plane out from under its own base cell. */
+void background_apply(WM *wm)
+{
+	bg_drop(wm, false); /* keep any retained visual for re-blit */
+	wm->bg_mode = bg_resolve_mode(wm);
+	comp_layer_damage_full(comp_root_layer(wm->comp));
+
+	if (wm->bg_mode != BG_IMAGE) {
+		return;
+	}
+
+	/* Confine the image to the desktop area above the taskbar: a pixel bitmap
+	 * that reaches the last physical row (or hangs off an edge) makes some
+	 * terminals scroll the whole display. The bitmap is a child of `area`, so
+	 * STRETCH/SCALE size to it and CENTER/TILE stay inside it. */
+	int aw = (int)wm->scr_cols;
+	int ah = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
+	if (ah < 1) {
+		ah = (int)wm->scr_rows;
+	}
+	vp_rect ar = { 0, 0, ah, aw };
+	wm->bg_layer = comp_layer_new(wm->comp, VP_BAND_BACKDROP, ar, NULL, wm);
+	if (!wm->bg_layer) {
+		return;
+	}
+	struct ncplane *area = comp_layer_plane(wm->bg_layer);
+	uint64_t tb = 0;
+	ncchannels_set_fg_alpha(&tb, NCALPHA_TRANSPARENT);
+	ncchannels_set_bg_alpha(&tb, NCALPHA_TRANSPARENT);
+	ncplane_set_base(area, "", 0, tb);
+
+	struct ncplane *img = NULL;
+	switch (wm->theme.bg_fit) {
+	case FIT_STRETCH:
+		img = bg_blit(wm, area, 0, 0, NCSCALE_STRETCH);
+		break;
+	case FIT_SCALE:
+		img = bg_blit(wm, area, 0, 0, NCSCALE_SCALE);
+		if (img) {
+			bg_center(img, ah, aw);
+		}
+		break;
+	case FIT_CENTER: {
+		img = bg_blit(wm, area, 0, 0, NCSCALE_NONE);
+		if (img) {
+			unsigned ph, pw;
+			ncplane_dim_yx(img, &ph, &pw);
+			if ((int)ph > ah || (int)pw > aw) {
+				/* Too big to centre without spilling onto the
+				 * taskbar row: fit it instead. */
+				ncplane_destroy(img);
+				img = bg_blit(wm, area, 0, 0, NCSCALE_SCALE);
+			}
+		}
+		if (img) {
+			bg_center(img, ah, aw);
+		}
+		break;
+	}
+	case FIT_TILE:
+		/* One desktop-sized bitmap of the tiled image, edge to edge. */
+		img = bg_blit_tiled(wm, area, ah, aw);
+		if (!img) {
+			img = bg_blit(wm, area, 0, 0, NCSCALE_STRETCH);
+		}
+		break;
+	}
+	if (img) {
+		comp_sublayer_adopt(wm->bg_layer, img, wm);
+	}
 }
 
 void theme_apply(WM *wm)
@@ -398,34 +395,12 @@ void theme_apply(WM *wm)
 				   wm->config.color_overrides[i].color);
 	}
 
-	if (wm->taskbar) {
-		uint64_t ch = 0;
-		vp_rgb f = wm->theme.bar_fg, b = wm->theme.bar_bg;
-		ncchannels_set_fg_rgb8(&ch, (f >> 16) & 0xff, (f >> 8) & 0xff,
-				       f & 0xff);
-		ncchannels_set_bg_rgb8(&ch, (b >> 16) & 0xff, (b >> 8) & 0xff,
-				       b & 0xff);
-		ncplane_set_base(wm->taskbar, " ", 0, ch);
-	}
-	if (wm->cursor) {
-		uint64_t cc = 0;
-		vp_rgb cf = wm->theme.cursor_fg, cb = wm->theme.cursor_bg;
-		ncchannels_set_fg_rgb8(&cc, (cf >> 16) & 0xff, (cf >> 8) & 0xff,
-				       cf & 0xff);
-		ncchannels_set_bg_rgb8(&cc, (cb >> 16) & 0xff, (cb >> 8) & 0xff,
-				       cb & 0xff);
-		ncplane_set_channels(wm->cursor, cc);
-		ncplane_putstr_yx(wm->cursor, 0, 0, "█");
-	}
-	if (wm->settings.panel) {
-		uint64_t base = 0;
-		vp_rgb pf = wm->theme.panel_fg, pb = wm->theme.panel_bg;
-		ncchannels_set_fg_rgb8(&base, (pf >> 16) & 0xff,
-				       (pf >> 8) & 0xff, pf & 0xff);
-		ncchannels_set_bg_rgb8(&base, (pb >> 16) & 0xff,
-				       (pb >> 8) & 0xff, pb & 0xff);
-		ncplane_set_base(wm->settings.panel, " ", 0, base);
-	}
+	/* Everything below is just "this now looks different": each surface is
+	 * marked for repaint and the compositor re-runs its painter, which reads
+	 * the new palette. */
+	taskbar_damage(wm);
+	comp_layer_damage(wm->pointer);
+	settings_damage(&wm->settings);
 	settings_icon_redraw(wm);
 	exit_icon_redraw(wm);
 	die_icon_redraw(wm);
@@ -439,14 +414,9 @@ void theme_apply(WM *wm)
 	background_apply(wm);
 
 	for (int i = 0; i < wm->nwins; i++) {
-		wm->wins[i]->frame_dirty = true;
-		wm->wins[i]->dirty = true;
+		window_damage_frame(wm->wins[i]);
+		window_damage_content(wm->wins[i], true);
 	}
-	wm->taskbar_dirty = true;
-	if (wm->settings.open) {
-		wm->settings.dirty = true;
-	}
-	wm->needs_render = true;
 }
 
 bool wm_add_window(WM *wm, Window *win)
@@ -461,7 +431,7 @@ bool wm_add_window(WM *wm, Window *win)
 		wm->cap = ncap;
 	}
 	wm->wins[wm->nwins++] = win;
-	wm->taskbar_dirty = true;
+	taskbar_damage(wm);
 	return true;
 }
 
@@ -475,28 +445,27 @@ void wm_remove_window(WM *wm, Window *win)
 		wm->wins[i] = wm->wins[i + 1];
 	}
 	wm->nwins--;
-	wm->taskbar_dirty = true;
+	taskbar_damage(wm);
 
 	if (wm->nwins == 0) {
 		wm->focused = -1;
 	} else if (wm->focused == idx) {
+		/* Focus falls to whichever visible window is frontmost. The
+		 * compositor's stacking key answers that directly - no walking
+		 * the terminal's plane list looking for one we recognise. */
 		wm->focused = -1;
-		for (struct ncplane *p = notcurses_top(wm->nc); p;
-		     p = ncplane_below(p)) {
-			Window *cand = ncplane_userptr(p);
-			for (int i = 0; i < wm->nwins; i++) {
-				if (wm->wins[i] == cand && !cand->minimized) {
-					wm_focus_index(wm, i);
-					break;
-				}
+		int best = -1, best_order = 0;
+		for (int i = 0; i < wm->nwins; i++) {
+			if (wm->wins[i]->minimized) {
+				continue;
 			}
-			if (wm->focused >= 0) {
-				break;
+			int o = comp_layer_order(wm->wins[i]->frame);
+			if (best < 0 || o > best_order) {
+				best = i;
+				best_order = o;
 			}
 		}
-		if (wm->focused < 0 && wm->nwins > 0) {
-			wm_focus_index(wm, wm->nwins - 1);
-		}
+		wm_focus_index(wm, best >= 0 ? best : wm->nwins - 1);
 	} else if (wm->focused > idx) {
 		wm->focused--;
 	}
@@ -530,26 +499,17 @@ void wm_focus_index(WM *wm, int idx)
 
 	wm->focused = idx;
 	vp_log("focus id=%d idx=%d\n", win->id, idx);
-	/* Raising a frame over another window's image occludes its sprixel, which
-	 * notcurses won't reliably re-emit; bracket the z-order change so every
-	 * window's bitmap is dropped and cleanly re-blitted at the new stacking. */
-	sixel_drop_all(wm);
-	/* Raise the focused frame and its bound content to the top. */
-	ncplane_move_family_top(win->frame);
-	sixel_reblit_all(wm);
+	/* Frontmost within the window band - which the band itself keeps below
+	 * the taskbar and the modal panel. Any image the raise now covers, or
+	 * uncovers, is the compositor's to sort out. */
+	comp_layer_raise(win->frame);
 
 	if (prev && prev != win) {
-		prev->frame_dirty = true;
+		window_damage_frame(prev);
 	}
-	win->frame_dirty = true;
-	wm->taskbar_dirty = true;
-
+	window_damage_frame(win);
+	taskbar_damage(wm);
 	taskbar_reveal(wm, idx);
-
-	/* Keep the taskbar above all windows. */
-	if (wm->taskbar) {
-		ncplane_move_top(wm->taskbar);
-	}
 }
 
 void wm_focus_window(WM *wm, Window *win)
@@ -614,11 +574,10 @@ void wm_minimize(WM *wm, Window *win)
 	}
 	win->minimized = true;
 	vp_log("minimize id=%d\n", win->id);
-	/* Drop any image planes first: parking the frame off-screen would drag
-	 * their pixel bitmaps off-screen too, which scrolls some terminals. The
-	 * visuals are kept, so restore re-blits them. */
-	sixel_planes_drop(win);
-	ncplane_move_yx(win->frame, VP_HIDDEN_Y, win->x);
+	/* Hidden is a state, not a position: the window keeps its geometry, and
+	 * the compositor tears its bitmaps down rather than dragging them
+	 * off-screen (which scrolls some terminals). */
+	comp_layer_show(win->frame, false);
 
 	if (wm_focused(wm) == win) {
 		wm->focused = -1;
@@ -629,7 +588,7 @@ void wm_minimize(WM *wm, Window *win)
 			}
 		}
 	}
-	wm->taskbar_dirty = true;
+	taskbar_damage(wm);
 }
 
 void wm_restore(WM *wm, Window *win)
@@ -639,11 +598,11 @@ void wm_restore(WM *wm, Window *win)
 	}
 	win->minimized = false;
 	vp_log("restore id=%d\n", win->id);
-	ncplane_move_yx(win->frame, win->y, win->x);
-	win->frame_dirty = true;
-	win->dirty = true;
+	comp_layer_show(win->frame, true);
+	window_damage_frame(win);
+	window_damage_content(win, false);
 	wm_focus_window(wm, win);
-	wm->taskbar_dirty = true;
+	taskbar_damage(wm);
 }
 
 void wm_toggle_maximize(WM *wm, Window *win)
@@ -664,7 +623,7 @@ void wm_toggle_maximize(WM *wm, Window *win)
 		win->maximized = false;
 		window_set_geometry(win, win->sx, win->sy, win->sw, win->sh);
 	}
-	win->dirty = true;
+	window_damage_content(win, false);
 }
 
 void wm_move_focused(WM *wm, int dx, int dy)
@@ -723,6 +682,7 @@ void wm_handle_resize(WM *wm)
 {
 	notcurses_refresh(wm->nc, NULL, NULL);
 	notcurses_stddim_yx(wm->nc, &wm->scr_rows, &wm->scr_cols);
+	comp_resize(wm->comp);
 
 	if (wm->taskbar) {
 		taskbar_reflow(wm);
@@ -740,121 +700,54 @@ void wm_handle_resize(WM *wm)
 		} else if (!win->minimized) {
 			wm_clamp_onscreen(wm, win);
 		}
-		win->dirty = true;
-		win->frame_dirty = true;
+		window_damage_content(win, false);
+		window_damage_frame(win);
 	}
-	wm->taskbar_dirty = true;
+	taskbar_damage(wm);
 	if (wm->settings.open) {
-		wm->settings.dirty = true;
+		settings_damage(&wm->settings);
 	}
 }
 
 Window *wm_window_at(WM *wm, int y, int x)
 {
-	for (struct ncplane *p = notcurses_top(wm->nc); p;
-	     p = ncplane_below(p)) {
-		Window *win = ncplane_userptr(p);
-		if (!win) {
-			continue;
-		}
-		/* userptr is only set on frame planes; confirm it's a live window */
-		if (win->frame != p || win->minimized) {
-			continue;
-		}
-		if (y >= win->y && y < win->y + win->h && x >= win->x &&
-		    x < win->x + win->w) {
-			return win;
-		}
-	}
-	return NULL;
+	/* Hit testing is a scene question, so the scene answers it: the
+	 * compositor knows the true stacking and which windows are hidden. */
+	vp_layer *l = comp_layer_at(wm->comp, VP_BAND_WINDOW, y, x);
+	return l ? comp_layer_user(l) : NULL;
 }
 
+/* Where the hardware text cursor should be: inside the focused window's grid,
+ * on the live screen, and not while the modal settings editor has the input. */
+static void update_text_cursor(WM *wm)
+{
+	Window *f = wm_focused(wm);
+	bool on = (!wm->settings.open && f && !f->minimized &&
+		   f->cursor_visible && f->sb_offset == 0 && f->currow >= 0 &&
+		   f->currow < f->rows && f->curcol >= 0 &&
+		   f->curcol < f->cols);
+	if (!on) {
+		comp_set_cursor(wm->comp, false, 0, 0);
+		return;
+	}
+	vp_rect r = comp_layer_abs(f->content);
+	comp_set_cursor(wm->comp, true, r.y + f->currow, r.x + f->curcol);
+}
+
+/* One pass of the event loop's display half. Everything here is a *statement of
+ * intent* - titles refreshed, cursor placed - and the compositor decides what
+ * that costs: which painters run, whether the plane stack has to be rebuilt,
+ * which bitmaps move, and whether the frame is worth presenting at all. */
 void wm_render(WM *wm)
 {
-	/* Track whether anything actually changed this pass; if not, we skip the
-     * (expensive) notcurses_render entirely. needs_render carries signals from
-     * mutations that move planes without a per-object dirty flag (dragged icons,
-     * the snap outline, a closed settings panel). */
-	bool drew = wm->needs_render;
-	wm->needs_render = false;
-
 	for (int i = 0; i < wm->nwins; i++) {
-		Window *win = wm->wins[i];
-		/* Keep titles in step with the running program / shell cwd. Done for
-         * every window (not just visible ones) so the taskbar stays accurate. */
-		if (window_refresh_title(win)) {
-			wm->taskbar_dirty = true;
-		}
-		if (win->minimized) {
-			continue;
-		}
-		if (win->frame_dirty) {
-			window_draw_frame(wm, win);
-			drew = true;
-		}
-		if (win->dirty) {
-			vt_render(win);
-			drew = true;
+		/* Keep titles in step with the running program / shell cwd. Done
+		 * for every window (not just visible ones) so the taskbar stays
+		 * accurate. */
+		if (window_refresh_title(wm->wins[i])) {
+			taskbar_damage(wm);
 		}
 	}
-
-	if (wm->taskbar && wm->taskbar_dirty) {
-		taskbar_draw(wm);
-		drew = true;
-	}
-
-	if (settings_render(wm)) {
-		drew = true;
-	}
-
-	/* Inner cursor only for the focused window (suppressed while the modal
-     * settings editor is up). Compute the desired state, then compare against
-     * what we last applied: a bare cursor move (no content damage) still needs a
-     * render, while a pass that changes nothing visible can be skipped. */
-	Window *f = wm_focused(wm);
-	bool want_cursor = (!wm->settings.open && f && !f->minimized &&
-			    f->cursor_visible && f->sb_offset == 0 &&
-			    f->currow >= 0 && f->currow < f->rows &&
-			    f->curcol >= 0 && f->curcol < f->cols);
-	int cy = 0, cx = 0;
-	if (want_cursor) {
-		int ay, ax;
-		ncplane_abs_yx(f->content, &ay, &ax);
-		cy = ay + f->currow;
-		cx = ax + f->curcol;
-	}
-	if (want_cursor != wm->cursor_on ||
-	    (want_cursor && (cy != wm->cursor_y || cx != wm->cursor_x))) {
-		drew = true;
-	}
-
-	bool want_ptr = wm->draw_cursor && wm->cursor;
-	if (want_ptr &&
-	    (wm->mouse_y != wm->ptr_y || wm->mouse_x != wm->ptr_x)) {
-		drew = true;
-	}
-
-	if (!drew) {
-		return; /* don't pay for a render on unchanged frames */
-	}
-
-	if (want_cursor) {
-		notcurses_cursor_enable(wm->nc, cy, cx);
-	} else {
-		notcurses_cursor_disable(wm->nc);
-	}
-	wm->cursor_on = want_cursor;
-	wm->cursor_y = cy;
-	wm->cursor_x = cx;
-
-	/* Park the software pointer over the last mouse cell, on top of everything
-     * else (taskbar/settings raise themselves, so re-assert top each frame). */
-	if (want_ptr) {
-		ncplane_move_yx(wm->cursor, wm->mouse_y, wm->mouse_x);
-		ncplane_move_top(wm->cursor);
-		wm->ptr_y = wm->mouse_y;
-		wm->ptr_x = wm->mouse_x;
-	}
-
-	notcurses_render(wm->nc);
+	update_text_cursor(wm);
+	comp_frame(wm->comp);
 }
