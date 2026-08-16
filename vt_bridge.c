@@ -55,12 +55,9 @@ static int cb_damage(VTermRect rect, void *user)
 {
 	Window *w = user;
 	dmg_add_rows(w, rect.start_row, rect.end_row);
-	/* A full-screen erase (e.g. `clear`/ED 2J) discards any sixel on the live
-	 * screen: its text is gone, so the pixels must go too. We deliberately do
-	 * NOT evict on smaller damage - the cursor and prompt naturally land on an
-	 * image's edge after a scroll, and treating that incidental rewrite as an
-	 * erase would drop a freshly-placed image before it ever showed. Buffer
-	 * switches (alt-screen TUIs like vim) are handled in cb_settermprop. */
+	/* A full-screen erase discards any sixel on the live screen; smaller damage
+	 * is deliberately not treated as an erase, or a cursor landing on an
+	 * image's edge after a scroll would drop it before it ever showed. */
 	if (rect.start_row <= 0 && rect.end_row >= w->rows &&
 	    rect.start_col <= 0 && rect.end_col >= w->cols) {
 		sixel_damage(w, rect.start_row, rect.end_row, rect.start_col,
@@ -105,15 +102,13 @@ static int cb_settermprop(VTermProp prop, VTermValue *val, void *user)
 		w->app_mouse = val->number != VTERM_PROP_MOUSE_NONE;
 		break;
 	case VTERM_PROP_ALTSCREEN:
-		/* Switching screen buffers (vim and other full-screen TUIs use the
-		 * alternate screen) replaces everything on the live screen. Our images
-		 * are anchored in shared scrollback coordinates and can't tell the two
-		 * buffers apart, so a primary-screen sixel would otherwise bleed through
-		 * the alt screen. Drop them on any switch, either direction. */
+		/* Images are anchored in shared scrollback coordinates and can't
+		 * tell the two buffers apart, so a primary-screen sixel would
+		 * bleed through the alt screen. Drop them on any switch. */
 		sixel_images_clear(w);
 		break;
-	/* OSC window titles are intentionally ignored: viewpoint derives the title
-     * itself from the PTY's foreground program / shell cwd (window_refresh_title). */
+	/* OSC window titles are intentionally ignored: the title is derived
+	 * from the PTY's foreground program / shell cwd (window_refresh_title). */
 	default:
 		break;
 	}
@@ -253,14 +248,9 @@ static const VTermScreenCallbacks screen_cbs = {
 };
 
 /* libvterm hands unrecognised DCS sequences here. We only care about sixel:
- * DCS <Pa;Pb;Ph> q <data> ST, whose command bytes are optional numeric params
- * (digits and ';') followed by the final 'q'. Other 'q'-terminated DCS queries
- * carry an intermediate byte before the 'q' and must NOT be mistaken for sixel:
- * XTGETTCAP is "+q" and DECRQSS is "$q" (the latter libvterm handles itself, so
- * it never reaches us). Swallowing XTGETTCAP as sixel both decodes garbage and
- * starves the inner app of its reply, hanging capability probes (e.g.
- * notcurses). So require every byte before the 'q' to be a digit or ';'.
- * Everything else is dropped (return 0). */
+ * DCS <Pa;Pb;Ph> q <data> ST, whose command bytes are digits/';' before a final
+ * 'q'. Other 'q'-terminated DCS (e.g. XTGETTCAP's "+q") must not be mistaken
+ * for sixel, or it decodes garbage and hangs the app's capability probe. */
 static int cb_dcs(const char *command, size_t commandlen,
 		  VTermStringFragment frag, void *user)
 {
@@ -298,13 +288,10 @@ static int cb_csi(const char *leader, const long args[], int argcount,
 	return 0;
 }
 
-/* libvterm hands unrecognised OSC here. We answer the dynamic-color *queries*
- * OSC 10 (foreground), 11 (background) and 12 (cursor) with our window's default
- * colors, in xterm's rgb:RRRR/GGGG/BBBB form. Apps use these to blend into the
- * terminal background; notably lsix queries OSC 11 and, getting no answer,
- * defaults to a white montage background (the wrong-background bug). A color-set
- * request (payload other than "?") is consumed but ignored. Every other OSC
- * keeps libvterm's default (dropped). */
+/* Answer the dynamic-color queries OSC 10/11/12 (fg/bg/cursor) with our
+ * window's default colors in xterm's rgb:RRRR/GGGG/BBBB form - apps like lsix
+ * use these to blend into the terminal background. A color-set request
+ * (payload other than "?") is consumed but ignored. */
 static int cb_osc(int command, VTermStringFragment frag, void *user)
 {
 	Window *w = user;
@@ -366,15 +353,10 @@ static void cb_output(const char *s, size_t len, void *user)
 {
 	Window *w = user;
 
-	/* Advertise sixel to the inner app when the host can actually show pixels.
-	 * libvterm answers the primary DA query (CSI c) with ESC[?1;2c, a VT100-class
-	 * reply (leading '1') whose remaining parameters are an options bitmask, NOT
-	 * the parametric feature list of VT220+ terminals. The sixel attribute '4'
-	 * only has meaning in that VT220+ feature list, so we can't just splice ';4'
-	 * onto ESC[?1;2c: ESC[?1;2;4c is malformed, and strict DA1 parsers (notcurses
-	 * among them) fail to recognise it as a terminator and block forever waiting
-	 * for the reply. So replace the whole reply with a VT220-class DA1 that lists
-	 * sixel: ESC[?62;1;2;4c. */
+	/* Advertise sixel when the host can show pixels. libvterm's DA1 reply
+	 * (ESC[?1;2c) is VT100-class, where splicing in the sixel attribute ';4'
+	 * would be malformed and hang strict DA1 parsers; replace it wholesale
+	 * with a VT220-class DA1 that lists sixel: ESC[?62;1;2;4c. */
 	static const char da1[] = "\x1b[?1;2c";
 	static const char da1_sixel[] = "\x1b[?62;1;2;4c";
 	const size_t dn = sizeof(da1) - 1;
@@ -552,12 +534,9 @@ void vt_mouse_button(Window *w, int button, bool pressed, VTermModifier mod)
 static VTermModifier vterm_mods(const ncinput *ni)
 {
 	VTermModifier mod = VTERM_MOD_NONE;
-	/* notcurses carries modifiers two ways and does not keep them in sync (see
-     * the "FIXME for abi4" on ncinput): the deprecated alt/shift/ctrl bools (set
-     * by the legacy path - e.g. Konsole's ESC-prefixed Alt arrives as alt=1) and
-     * the ni->modifiers bitmask (set by the kitty/CSI-u path - e.g. Ctrl+c
-     * arrives as id='c' with NCKEY_MOD_CTRL and the bool left clear). Consult
-     * both, or e.g. a forwarded Ctrl+c degrades to a bare 'c' for the app. */
+	/* notcurses carries modifiers two ways that aren't kept in sync (legacy
+	 * alt/shift/ctrl bools vs. the kitty/CSI-u modifiers bitmask); consult
+	 * both or a forwarded Ctrl+c degrades to a bare 'c' for the app. */
 	if (ni->shift || (ni->modifiers & NCKEY_MOD_SHIFT))
 		mod |= VTERM_MOD_SHIFT;
 	if (ni->alt || (ni->modifiers & NCKEY_MOD_ALT))
@@ -636,14 +615,10 @@ void vt_send_key(Window *w, const ncinput *ni)
 		return;
 	}
 
-	/* notcurses uppercases ASCII letters whenever Ctrl or Shift is held, for
-     * cross-backend consistency (see load_ncinput() in notcurses) - so Ctrl+c
-     * reaches us as 'C'. But libvterm only folds *lowercase* a-z down to a C0
-     * control byte (c & 0x1f); handed an uppercase letter with Ctrl it instead
-     * emits a CSI-u sequence ("\e[67;5u"), which inner apps that never enabled
-     * that protocol print literally. Undo the uppercasing for the Ctrl case so
-     * Ctrl+c yields 0x03. (Shift-only stays uppercase: that 'A' is the real
-     * character to send, and libvterm drops Shift for printable chars anyway.) */
+	/* notcurses uppercases ASCII letters when Ctrl/Shift is held, so Ctrl+c
+	 * reaches us as 'C' - but libvterm only folds lowercase a-z to a C0 byte,
+	 * emitting a literal CSI-u sequence otherwise. Undo it for Ctrl so Ctrl+c
+	 * yields 0x03 (Shift-only stays uppercase: that's the real character). */
 	if ((mod & VTERM_MOD_CTRL) && id >= 'A' && id <= 'Z') {
 		id += 'a' - 'A';
 	}
@@ -815,10 +790,8 @@ void vt_render(Window *w)
 	if (off > w->sb_count)
 		off = w->sb_count;
 
-	/* Repaint only the rows libvterm reported as damaged. A precise row range
-     * applies only to the live screen (off == 0); any scrollback view, plus
-     * scrolls/resizes (dmg_all) and the dirty-without-damage fallback, sweeps
-     * the whole grid. */
+	/* Repaint only the rows libvterm reported damaged; any scrollback view or
+	 * a full-repaint condition (dmg_all) sweeps the whole grid instead. */
 	int r0 = 0, r1 = w->rows;
 	if (off == 0 && !w->dmg_all && w->dmg_valid) {
 		r0 = w->dmg_r0 < 0 ? 0 : w->dmg_r0;
@@ -827,10 +800,8 @@ void vt_render(Window *w)
 
 	cellcache cc = { 0 };
 
-	/* The visible region is a window into [scrollback ... live screen]: visible
-     * row r maps to combined index (sb_count - off) + r, where indices below
-     * sb_count are retained history and the rest are live screen rows. With
-     * off == 0 this is exactly the live screen. */
+	/* Visible row r maps to combined index (sb_count - off) + r: indices below
+	 * sb_count are retained history, the rest live screen rows. */
 	for (int row = r0; row < r1; row++) {
 		int ci = w->sb_count - off + row;
 		if (ci < w->sb_count) {

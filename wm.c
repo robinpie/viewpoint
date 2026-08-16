@@ -17,12 +17,8 @@
 
 /* wm.c - window-manager core: the window list, focus, stacking policy,
  * layout (move/resize/min/max), spawning/closing, and the per-frame update.
- *
- * Stacking is expressed, not performed: a window is a layer in the compositor's
- * VP_BAND_WINDOW band, focusing one raises it within that band, and the
- * compositor works out what that means for the plane stack. Nothing here can
- * put a window over the taskbar, and nothing here has to re-assert the taskbar's
- * position afterwards.
+ * Stacking is expressed, not performed: a window is a layer in the
+ * compositor's VP_BAND_WINDOW band, and focusing one just raises it there.
  */
 #define _GNU_SOURCE
 #include "viewpoint.h"
@@ -59,10 +55,9 @@ void wm_init(WM *wm, struct notcurses *nc)
 	 * active palette (the taskbar/cursor are recolored by their own creators). */
 	theme_apply(wm);
 
-	/* TERM=linux means the bare Linux console: we drive GPM ourselves (see
-     * main.c) and must draw a software pointer, because gpm's own pointer is a
-     * cell inversion that our full-screen repaint immediately overwrites. In a
-     * GUI terminal the emulator renders the real mouse cursor for us. */
+	/* TERM=linux means the bare console: we drive GPM ourselves and must draw a
+	 * software pointer, since our full-screen repaint overwrites gpm's own
+	 * cell-inversion cursor. GUI terminals render the real cursor for us. */
 	const char *term = getenv("TERM");
 	wm->console = term && strncmp(term, "linux", 5) == 0;
 	wm->draw_cursor = wm->console;
@@ -151,13 +146,10 @@ static struct ncplane *bg_blit(WM *wm, struct ncplane *parent, int y, int x,
 	return ncvisual_blit(wm->nc, wm->bg_visual, &o);
 }
 
-/* Compose the source image tiled across the whole desktop area into one RGBA
- * buffer and blit it as a *single* pixel-bitmap plane. Tiling with many separate
- * adjacent bitmap planes cascades/overlaps under kitty backends (e.g. Konsole),
- * which only reliably composite a single sprixel behind the text planes; one
- * desktop-sized bitmap behaves exactly like the stretch/scale modes. The buffer
- * is sized to the area in cells (ah*cdy x aw*cdx px), so it never reaches the
- * last physical row. Returns the plane (child of `area`), or NULL on failure. */
+/* Compose the source image tiled across the desktop into one RGBA buffer and
+ * blit it as a single pixel-bitmap plane - many separate tiled planes cascade
+ * under kitty backends (e.g. Konsole), which only reliably composite one
+ * sprixel. Returns the plane (child of `area`), or NULL on failure. */
 static struct ncplane *bg_blit_tiled(WM *wm, struct ncplane *area, int ah,
 				     int aw)
 {
@@ -235,9 +227,7 @@ static void bg_center(struct ncplane *p, int bound_h, int bound_w)
 }
 
 /* The background mode we can actually honour: an image needs pixel support and
- * a loadable file, and falls back to a solid fill without them. Decoding is a
- * side effect, so this is called once per background_apply and its result is
- * cached for the desktop painter. */
+ * a loadable file, falling back to a solid fill without them. */
 static vp_bg_mode bg_resolve_mode(WM *wm)
 {
 	vp_bg_mode mode = wm->theme.bg_mode;
@@ -262,10 +252,9 @@ static vp_bg_mode bg_resolve_mode(WM *wm)
 	return wm->bg_visual ? BG_IMAGE : BG_SOLID;
 }
 
-/* Painter for the desktop surface itself (the compositor's root layer). The
- * base cell carries the desktop glyph for SOLID and a blank in the background
- * colour otherwise, so PATTERN gaps and IMAGE letterboxing read as the theme
- * background. */
+/* Painter for the desktop surface (the compositor's root layer). The base
+ * cell carries the desktop glyph for SOLID, a blank otherwise, so PATTERN
+ * gaps and IMAGE letterboxing read as the theme background. */
 static void desktop_paint(struct ncplane *p, bool full, void *user)
 {
 	(void)full;
@@ -300,10 +289,8 @@ static void desktop_paint(struct ncplane *p, bool full, void *user)
 }
 
 /* (Re)build the desktop background. For BG_IMAGE this creates one backdrop-band
- * layer covering the desktop area with the blitted bitmap hanging off it as a
- * sublayer, so a single destroy takes the whole thing down and the band alone
- * guarantees it stays under every window - no move_family_bottom, and no
- * shuffling the standard plane out from under its own base cell. */
+ * layer covering the desktop with the blitted bitmap as a sublayer, so a
+ * single destroy takes it all down and the band keeps it under every window. */
 void background_apply(WM *wm)
 {
 	bg_drop(wm, false); /* keep any retained visual for re-blit */
@@ -734,10 +721,8 @@ static void update_text_cursor(WM *wm)
 	comp_set_cursor(wm->comp, true, r.y + f->currow, r.x + f->curcol);
 }
 
-/* One pass of the event loop's display half. Everything here is a *statement of
- * intent* - titles refreshed, cursor placed - and the compositor decides what
- * that costs: which painters run, whether the plane stack has to be rebuilt,
- * which bitmaps move, and whether the frame is worth presenting at all. */
+/* One pass of the event loop's display half: state intent (titles, cursor)
+ * and let the compositor decide what repainting it actually costs. */
 void wm_render(WM *wm)
 {
 	for (int i = 0; i < wm->nwins; i++) {

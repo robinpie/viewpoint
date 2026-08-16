@@ -17,18 +17,10 @@
 
 /* settings.c - the in-app settings panel.
  *
- * A small launcher "icon" sits on the desktop (top-left, just above the
- * background). Clicking it opens a modal panel that lands on a Control-Panel
- * grid of tiles; each tile opens a sub-view. Populated tiles are "Keybindings"
- * (the keybinding editor) and "Terminal" (scrollback size / scroll step); the
- * rest are empty placeholders, ready for future settings. While the panel is
- * open it captures all keyboard/mouse input (see the hooks in input.c).
- *
- * Keybinding editor: select a row (↑/↓ or click) and press Enter - the next
- * chord you press is bound to that action live. Esc returns to the grid; Esc on
- * the grid closes the panel and persists the keymap via config_save(). The heavy
- * lifting (chord parsing/format, rebinding) lives in input.c/config.c; this file
- * is just UI + state.
+ * A desktop launcher icon opens a modal panel that lands on a Control-Panel
+ * grid of tiles ("Keybindings", "Terminal", "Appearance"); each tile opens a
+ * sub-view and captures all input while open (see the hooks in input.c).
+ * Chord parsing/rebinding lives in input.c/config.c; this file is UI + state.
  */
 #define _GNU_SOURCE
 #include "viewpoint.h"

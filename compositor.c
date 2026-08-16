@@ -17,12 +17,10 @@
 
 /* compositor.c - scene graph, stacking, pixel graphics and presentation.
  *
- * The model is a flat array of layers, each carrying the band/order/sequence
- * that fixes its place in the stack. Any mutation that could change what the
- * screen looks like bumps a single revision counter; comp_frame compares that
- * counter against the revisions the stack and the graphics were last brought in
- * line with, and does only the work the difference implies. See compositor.h
- * for the contract this file implements.
+ * A flat array of layers, each carrying the band/order/sequence that fixes
+ * its place in the stack. Any scene-changing mutation bumps a revision
+ * counter; comp_frame diffs it against what the stack/graphics last matched
+ * and does only the work implied. See compositor.h for the contract.
  */
 #define _GNU_SOURCE
 #include "compositor.h"
@@ -69,13 +67,10 @@ struct vp_graphic {
 	int y, x; /* owner-relative cell anchor */
 	int h, w; /* footprint in cells */
 
-	/* What is actually on screen, for diffing against what should be. The
-	 * anchor is compared in *owner-local* coordinates: the bitmap's plane is
-	 * a child of its owner's, so a window that moves carries it along for
-	 * free. Re-emitting a bitmap that merely rode its parent somewhere else
-	 * is not just wasted work - each teardown leaves the terminal to erase
-	 * pixels it has already drawn, and the ones it misses are the smears
-	 * that trail behind a dragged window. */
+	/* What is actually on screen, for diffing against what should be. Compared
+	 * in owner-local coords, since the bitmap rides its owner's plane for
+	 * free; re-emitting one that merely rode along wastes work and can leave
+	 * smears trailing behind a dragged window. */
 	bool shown;
 	int shown_y, shown_x; /* owner-local anchor of the live bitmap */
 	vp_rect shown_abs; /* where it currently sits on screen */
@@ -427,15 +422,9 @@ static bool layer_within(const vp_layer *l, const vp_layer *ancestor)
 }
 
 /* Take down any bitmap under `l` that the pending change is about to make
- * undisplayable.
- *
- * The caller updates the *model* first and calls this while the planes are
- * still where the terminal actually drew them, because that is the only moment
- * the pixels can still be erased: once a plane has been parked off-screen (how
- * hiding is implemented) or slid out of view, destroying it tells the terminal
- * nothing about the cells it left painted somewhere else. Getting this order
- * wrong is what strands a picture on the desktop after its window is minimised,
- * so it is enforced here rather than remembered at every call site. */
+ * undisplayable. Called with the model already updated but the planes still
+ * where the terminal drew them - the only moment the pixels can be erased;
+ * doing this after parking/hiding the plane would strand the picture. */
 static void gfx_withdraw_hidden(vp_comp *c, vp_layer *l)
 {
 	if (c->ngfx == 0) {
@@ -746,12 +735,9 @@ static void gfx_untrack(vp_comp *c, vp_graphic *g)
 	}
 }
 
-/* A bitmap that has just appeared or disappeared leaves the cells it covered
- * needing a repaint - the terminal annihilates cells beneath a sprixel and does
- * not reliably bring them back on its own. Damage from the top down and stop at
- * the first opaque layer that wholly covers the rect: that layer owns those
- * cells, and repainting anything below it would be wasted work (a desktop-wide
- * background repaint every time an image scrolls away, for instance). */
+/* A bitmap that just appeared or disappeared leaves the cells it covered
+ * needing a repaint. Damage from the top down and stop at the first opaque
+ * layer that wholly covers the rect - repainting below it is wasted work. */
 static void damage_under(vp_comp *c, vp_rect r)
 {
 	comp_sort(c);
@@ -970,15 +956,10 @@ static bool comp_graphics_sync(vp_comp *c)
 /* Stacking                                                                  */
 /* ------------------------------------------------------------------------- */
 
-/* Rewrite notcurses' plane stack to match the scene, bottom up. Every plane is
- * given an explicit position relative to the one below it, so the result
- * depends only on the model - never on the order in which callers happened to
- * mutate it.
- *
- * Returns true if the order actually moved. Most scene changes (a window slides
- * across the desktop) leave the order exactly as it was, and saying so is worth
- * the comparison: it spares the whole pile a pointless re-splice, and it spares
- * every visible bitmap a teardown it does not need. */
+/* Rewrite notcurses' plane stack to match the scene, bottom up, so the result
+ * depends only on the model. Returns true if the order actually moved - most
+ * scene changes (a window sliding) leave it unchanged, sparing a re-splice
+ * and every visible bitmap a teardown it doesn't need. */
 static bool comp_restack(vp_comp *c)
 {
 	comp_sort(c);
@@ -1051,12 +1032,9 @@ static bool comp_paint(vp_comp *c)
 	return drew;
 }
 
-/* Painting, stacking and graphics feed each other: a painter can re-anchor a
- * bitmap, and placing a bitmap damages the layers whose cells it ate. Settle
- * them before presenting - leaving work for "next frame" would strand it, since
- * the event loop only comes back here when something else happens. The bound is
- * a backstop against a painter that dirties itself; three passes is already one
- * more than the interaction needs. */
+/* Painting, stacking and graphics feed each other (a painter can re-anchor a
+ * bitmap; placing one damages the layers whose cells it ate), so settle them
+ * before presenting. The bound is a backstop against a self-dirtying painter. */
 #define COMP_MAX_PASSES 4
 
 bool comp_frame(vp_comp *c)

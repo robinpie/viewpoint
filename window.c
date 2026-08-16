@@ -17,15 +17,9 @@
 
 /* window.c - per-window lifecycle and frame (chrome) drawing.
  *
- * A window is a decoration ("frame") layer with a "content" sublayer. The frame
- * draws the border ring + title bar; the content sits in the 1-cell interior and
- * shows the child's terminal grid. Being a sublayer, the content (and every
- * image anchored in it) moves, raises and hides with the frame - the window as a
- * whole is one thing to the compositor.
- *
- * Both layers hand the compositor a painter and then never draw again on their
- * own: the code here only ever says "this needs repainting" and lets the
- * compositor decide when, and whether the result is worth a present.
+ * A window is a decoration ("frame") layer with a "content" sublayer showing
+ * the child's terminal grid; as a sublayer, content (and any anchored image)
+ * moves, raises and hides with the frame as one thing to the compositor.
  */
 #define _GNU_SOURCE
 #include "viewpoint.h"
@@ -244,10 +238,8 @@ bool window_refresh_title(Window *win)
 		return false;
 	}
 
-	/* Deriving the title hits /proc (tcgetpgrp + readlink/fopen). wm_render
-     * calls this for every window on every pass, so throttle each window to at
-     * most one poll per VP_TITLE_POLL_MS - otherwise a window streaming output
-     * (which renders constantly) would re-poll /proc on every frame. */
+	/* Deriving the title hits /proc; throttle to one poll per VP_TITLE_POLL_MS
+	 * so a window streaming output doesn't re-poll on every render pass. */
 	uint64_t now = mono_ns();
 	if (now < win->title_poll_ns) {
 		return false;
@@ -295,11 +287,9 @@ bool window_refresh_title(Window *win)
 		snprintf(next, sizeof(next), "%s", comm);
 	}
 
-	/* Truncate to the stored title's capacity *before* comparing: win->title
-     * already holds a truncated copy, so comparing the untruncated `next`
-     * against it would report a spurious change every call once the title
-     * exceeds VP_TITLE_MAX (e.g. a deep cwd), dirtying the frame/taskbar
-     * needlessly on every render. */
+	/* Truncate before comparing: win->title is already truncated, so comparing
+	 * against the untruncated `next` would report a spurious change on every
+	 * call once the title exceeds VP_TITLE_MAX. */
 	char fitted[VP_TITLE_MAX];
 	snprintf(fitted, sizeof(fitted), "%.*s", (int)sizeof(fitted) - 1, next);
 	if (strcmp(fitted, win->title) == 0) {

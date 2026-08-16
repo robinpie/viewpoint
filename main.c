@@ -16,12 +16,8 @@
  */
 
 /* main.c - initialization and the single poll(2)-based event loop (the spine).
- *
- * One poll set contains: notcurses' input fd, the GPM fd (bare console only),
- * and every window's PTY master fd. In a GUI terminal notcurses decodes the
- * mouse on its input fd; on the bare console we read GPM ourselves (the two are
- * mutually exclusive). After draining ready fds we do one render pass over the
- * window stack + taskbar.
+ * Polls notcurses' input fd, the session socket, and the GPM fd (bare console
+ * only); after draining ready fds it does one render pass.
  */
 #define _GNU_SOURCE
 #include "viewpoint.h"
@@ -131,11 +127,8 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* Own the terminal fully: stop the line discipline from turning ctrl+c,
-     * ctrl+\ and ctrl+z into SIGINT/SIGQUIT/SIGTSTP for *us*. As a multiplexer
-     * we must deliver those bytes to the focused window's program instead - and
-     * without this, ctrl+c would just kill viewpoint (notcurses' own quit
-     * sighandler tears down and exits) even in PASSTHROUGH mode. */
+	/* Stop the line discipline turning ctrl+c/\/z into signals for *us* - as a
+	 * multiplexer we must deliver those bytes to the focused window instead. */
 	notcurses_linesigs_disable(nc);
 
 	WM wm;
@@ -151,11 +144,9 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* Exactly one mouse source. On the bare console we drive GPM ourselves with
-     * the full event mask (so bare hover motion arrives); enabling notcurses'
-     * mice there too would open a second in-process libgpm client and the two
-     * would collide over GPM's shared global state. In a GUI terminal notcurses
-     * decodes the mouse and the emulator draws the pointer. */
+	/* Exactly one mouse source: bare console drives GPM directly (enabling
+	 * notcurses' mice too would collide over GPM's shared global state); GUI
+	 * terminals let notcurses decode the mouse. */
 	if (wm.console) {
 		gpm_setup(&wm);
 	} else {
@@ -179,22 +170,11 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* GUI terminal only: notcurses enables any-motion tracking (?1003h) but then
-     * enables X11 press/release tracking (?1000h). On terminals where the
-     * last-set mouse tracking mode wins (e.g. Konsole), that leaves us with
-     * press/release only and no button-held motion - so drags don't update live.
-     * Render once so notcurses flushes its own mouse setup, then re-assert a
-     * motion-reporting tracking mode so it's the active one.
-     *
-     * Re-assert ONLY the tracking modes (1002/1003) - never the report ENCODING.
-     * On terminals that support SGR-Pixels (?1016, e.g. foot, but not Konsole),
-     * notcurses negotiates pixel-coordinate mouse reports and divides them by the
-     * cell geometry itself. Forcing ?1006h here would flip the terminal back to
-     * cell-coordinate reports while notcurses still expected pixels - it would
-     * divide cell coords by the cell size and collapse every event into the
-     * top-left corner, i.e. a dead mouse. Leaving the encoding to notcurses keeps
-     * both the cell (1006) and pixel (1016) terminals working. These xterm
-     * sequences are meaningless on the console. */
+	/* GUI terminal only: notcurses sets any-motion tracking (?1003h) then X11
+	 * press/release tracking (?1000h); on terminals where the last-set mode
+	 * wins (e.g. Konsole) that leaves no button-held motion. Render once so
+	 * notcurses flushes its setup, then re-assert only the tracking modes -
+	 * never the report encoding, or SGR-Pixels terminals (?1016) go dead. */
 	wm_render(&wm);
 	if (!wm.console) {
 		static const char reassert[] = "\x1b[?1002h\x1b[?1003h";

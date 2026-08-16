@@ -17,46 +17,14 @@
 
 /* compositor.h - the scene graph and display pipeline.
  *
- * Everything that reaches the screen does so as a *layer*: a rectangle with a
- * backing ncplane, a place in a z-order band, a visibility flag, and a painter
- * callback the compositor invokes when the layer is damaged. The compositor is
- * the single owner of stacking, visibility, pixel-graphics placement, the text
- * cursor and the present call.
- *
- * The rules that make this maintainable, and that the rest of the tree must
- * respect:
- *
- *   1. Nobody else calls ncplane_move_top/bottom/above/below, ncplane_move_yx
- *      on a layer's plane, or notcurses_render. Stacking is *declarative*: you
- *      state which band a layer belongs to and (for windows) its order within
- *      that band, and comp_frame reconciles notcurses' actual plane stack to
- *      the model in one pass. The old imperative "raise this, then re-assert
- *      the taskbar on top, every frame" dance is gone, and with it the class of
- *      bugs where the final z-order depended on the order of the calls.
- *
- *   2. The compositor's model is authoritative, not notcurses' internal state.
- *      Layer geometry is read back from vp_layer, never from ncplane_abs_yx,
- *      so hiding a layer (which is implemented by parking its plane off-screen,
- *      because notcurses has no hide/show) can never corrupt a later position
- *      computation.
- *
- *   3. Pixel graphics (inline sixel/kitty bitmaps) are declared, not placed.
- *      You hand the compositor a decoded ncvisual anchored to a cell offset in
- *      its owning layer; the compositor decides each frame whether that bitmap
- *      is *actually* visible - fully inside its owner, fully on screen, clear
- *      of the last physical row, and not covered by any opaque layer stacked
- *      above it - and creates or destroys the sprixel plane accordingly. It
- *      re-emits only the bitmaps whose visibility, position or stacking really
- *      changed, and damages exactly the text layers a destroyed bitmap had
- *      annihilated cells in.
- *
- *   4. A frame that changes nothing costs nothing: comp_frame returns without
- *      presenting unless a layer was damaged, the scene revision moved, the
- *      graphics set changed, or the cursor moved.
- *
- * The compositor knows nothing about windows, terminals or themes - it deals
- * only in layers, rects and visuals - so it can be reasoned about (and changed)
- * without reading the rest of the tree.
+ * Everything on screen is a *layer*: a rect with a backing ncplane, a z-order
+ * band, a visibility flag, and a paint callback. The compositor is the sole
+ * owner of stacking, pixel-graphics placement, the text cursor and present().
+ * Stacking is declarative (band + order, reconciled by comp_frame) rather than
+ * imperative raise-calls; layer geometry is read from vp_layer, never from
+ * notcurses, so a hidden (off-screen-parked) layer can't corrupt later math.
+ * Pixel graphics are declared, not placed - the compositor blits them only
+ * when actually visible. A no-op frame presents nothing.
  */
 #ifndef VP_COMPOSITOR_H
 #define VP_COMPOSITOR_H
@@ -75,45 +43,37 @@ typedef struct vp_rect {
 	int y, x, h, w;
 } vp_rect;
 
-/* Z-order bands, bottom to top. Within a band, layers stack by their `order`
- * (see comp_layer_raise) and then by creation sequence. A band is a coarse
- * promise - "the taskbar is above every window, the modal panel above the
- * taskbar, the software pointer above everything" - that no amount of raising
- * inside a band can violate. */
+/* Z-order bands, bottom to top. Within a band, layers stack by `order` (see
+ * comp_layer_raise) then creation sequence; raising never crosses bands. */
 typedef enum {
-	VP_BAND_BACKDROP = 0, /* desktop background image */
+	VP_BAND_BACKDROP = 0,
 	VP_BAND_DESKTOP, /* launcher icons */
 	VP_BAND_WINDOW, /* window frames (+ their content sublayers) */
 	VP_BAND_OVERLAY, /* taskbar, snap-preview outline */
 	VP_BAND_MODAL, /* settings panel */
-	VP_BAND_POINTER, /* software mouse pointer */
+	VP_BAND_POINTER,
 	VP_BAND_COUNT
 } vp_band;
 
-/* Repaint a layer's plane. `full` is set when the compositor needs the whole
- * surface rebuilt rather than an incremental update - it is true after a pixel
- * bitmap that overlapped this layer was torn down, because the terminal has
- * annihilated the cells underneath it. Painters that track their own damage
- * (the terminal grid) must honour it; painters that always redraw everything
- * (chrome, taskbar, panel) can ignore it. */
+/* Repaint a layer's plane. `full` is set after an overlapping pixel bitmap was
+ * torn down (the terminal annihilated the cells beneath it); painters that
+ * track their own damage must honor it, painters that always redraw can ignore it. */
 typedef void (*vp_paint_fn)(struct ncplane *plane, bool full, void *user);
 
 /* ------------------------------------------------------------------------- */
 /* Lifecycle                                                                 */
 /* ------------------------------------------------------------------------- */
 
-/* Wrap a live notcurses context. The standard plane becomes the root surface:
- * it is always the floor of the stack, is never moved, and is painted through
- * comp_root_layer() like any other layer. Returns NULL on allocation failure. */
+/* Wrap a live notcurses context. The standard plane becomes the root surface
+ * (floor of the stack, never moved), painted via comp_root_layer(). */
 vp_comp *comp_create(struct notcurses *nc);
 
 /* Destroy every layer and graphic the compositor owns (not the notcurses
  * context, and not the standard plane). */
 void comp_destroy(vp_comp *c);
 
-/* Re-read the screen dimensions after a terminal resize. Callers reposition
- * their own layers afterwards; this only refreshes what the compositor's own
- * clipping and pointer logic depend on. */
+/* Re-read the screen dimensions after a terminal resize (callers reposition
+ * their own layers separately). */
 void comp_resize(vp_comp *c);
 
 struct notcurses *comp_nc(const vp_comp *c);
@@ -141,17 +101,14 @@ void comp_set_root_painter(vp_comp *c, vp_paint_fn paint, void *user);
 vp_layer *comp_layer_new(vp_comp *c, vp_band band, vp_rect r, vp_paint_fn paint,
 			 void *user);
 
-/* Create a layer whose plane already exists - the plane returned by
- * ncvisual_blit, which the compositor cannot allocate itself. Takes ownership:
- * the plane is destroyed with the layer. */
+/* Create a layer adopting an already-existing plane (e.g. from ncvisual_blit).
+ * Takes ownership: the plane is destroyed with the layer. */
 vp_layer *comp_layer_adopt(vp_comp *c, vp_band band, struct ncplane *plane,
 			   void *user);
 
-/* Create a sublayer: a plane bound to `parent`'s plane, whose rect is given in
- * parent-relative cells and which always stacks immediately above its parent.
- * Moving or hiding the parent carries it along, so a sublayer is never
- * positioned independently. This is how a window's terminal grid rides its
- * frame. `plane` variant adopts an already-blitted plane. */
+/* Create a sublayer bound to `parent`'s plane (rect in parent-relative cells),
+ * always stacked immediately above it and carried along when it moves/hides.
+ * This is how a window's terminal grid rides its frame. */
 vp_layer *comp_sublayer_new(vp_layer *parent, vp_rect local, vp_paint_fn paint,
 			    void *user);
 vp_layer *comp_sublayer_adopt(vp_layer *parent, struct ncplane *plane,
@@ -163,20 +120,17 @@ void comp_layer_destroy(vp_layer *l);
 struct ncplane *comp_layer_plane(const vp_layer *l);
 void *comp_layer_user(const vp_layer *l);
 
-/* Geometry. comp_layer_move takes absolute coordinates for a top-level layer
- * and parent-relative ones for a sublayer; comp_layer_resize resizes the plane
- * to match. comp_layer_rect returns the layer's own (possibly relative) rect,
- * comp_layer_abs the resolved absolute one - both remain correct while the
- * layer is hidden, which reading the plane back from notcurses would not. */
+/* Geometry: comp_layer_move takes absolute coords for a top-level layer,
+ * parent-relative for a sublayer. comp_layer_rect/_abs stay correct even
+ * while the layer is hidden, unlike reading the plane back from notcurses. */
 void comp_layer_move(vp_layer *l, int y, int x);
 void comp_layer_resize(vp_layer *l, int h, int w);
 vp_rect comp_layer_rect(const vp_layer *l);
 vp_rect comp_layer_abs(const vp_layer *l);
 
-/* Show or hide a layer (and, implicitly, its sublayers). Hiding is a first
- * class state, not "move it to row 100000": the layer keeps its geometry, is
- * skipped by hit testing and occlusion, and any pixel graphics it owns are torn
- * down rather than dragged off-screen. */
+/* Show or hide a layer (and its sublayers). Hiding is a first-class state:
+ * geometry is kept, hit testing/occlusion skip it, and its pixel graphics are
+ * torn down rather than dragged off-screen. */
 void comp_layer_show(vp_layer *l, bool visible);
 bool comp_layer_visible(const vp_layer *l);
 
@@ -208,22 +162,16 @@ vp_layer *comp_layer_at(vp_comp *c, vp_band band, int y, int x);
 /* ------------------------------------------------------------------------- */
 
 /* Attach a decoded bitmap to `owner` at an owner-relative cell anchor, sized
- * `cell_h` x `cell_w` cells. Takes ownership of `v` (destroyed with the
- * graphic), so the caller can forget about it. The bitmap is *declared*, not
- * placed: the compositor blits it if and when it is genuinely visible, and
- * re-blits it whenever the scene moves underneath it. Returns NULL if the
- * terminal has no pixel support or on allocation failure (in which case `v` is
- * destroyed). */
+ * `cell_h` x `cell_w`. Takes ownership of `v`. The bitmap is declared, not
+ * placed: the compositor blits it only when genuinely visible. Returns NULL
+ * (destroying `v`) if the terminal has no pixel support or on OOM. */
 vp_graphic *comp_graphic_add(vp_layer *owner, struct ncvisual *v, int local_y,
 			     int local_x, int cell_h, int cell_w);
 
 /* Re-anchor a graphic within its owner (a scrollback view that moved). */
 void comp_graphic_move(vp_graphic *g, int local_y, int local_x);
 
-/* Destroy a graphic and its retained visual. */
 void comp_graphic_remove(vp_graphic *g);
-
-/* Destroy every graphic attached to `owner`. */
 void comp_graphics_clear(vp_layer *owner);
 
 /* ------------------------------------------------------------------------- */

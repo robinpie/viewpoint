@@ -17,21 +17,16 @@
 
 /* config.c - locate, parse and apply the user config file.
  *
- * The config lives at $XDG_CONFIG_HOME/viewpoint/viewpoint.conf, falling back
- * to ~/.config/viewpoint/viewpoint.conf when XDG_CONFIG_HOME is unset. It is an
- * optional, line-oriented "key = value" file:
+ * An optional, line-oriented "key = value" file at
+ * $XDG_CONFIG_HOME/viewpoint/viewpoint.conf (or ~/.config/... as fallback):
  *
- *     # comments run to end of line
- *     bind   = alt+enter   new          # add or change a chord
- *     unbind = alt+f4                    # drop a default chord
- *     toggle = f12                       # the INTERPRET/PASSTHROUGH key
- *     scrollback  = 2000                 # per-window history lines
- *     scroll_step = 3                    # lines per mouse-wheel notch
+ *     bind   = alt+enter   new    # add or change a chord
+ *     unbind = alt+f4             # drop a default chord
+ *     toggle = f12                # the INTERPRET/PASSTHROUGH key
+ *     scrollback  = 2000          # per-window history lines
  *
- * The keymap starts as a copy of the built-in defaults (input.c), which the
- * bind/unbind lines then edit. Recognized keys are dispatched in config_apply();
- * add cases there as more tunables appear. Chord and action name parsing lives
- * in input.c, next to the keymap it builds.
+ * Recognized keys are dispatched in config_apply(). Chord/action name parsing
+ * lives in input.c, next to the keymap it builds.
  */
 #define _GNU_SOURCE
 #include "viewpoint.h"
@@ -862,12 +857,9 @@ void config_load(VpConfig *cfg)
 		return;
 	}
 
-	/* Apply every line to the live keymap in file order (in-app section then
-     * manual section, so the manual section wins). Separately capture the manual
-     * section verbatim so config_save() can preserve it.
-     *
-     * Sections: 0 = preamble (before any marker), 1 = in-app, 2 = manual. A
-     * file with no markers at all (hand-written) is treated as entirely manual. */
+	/* Apply lines in file order (manual section last wins) while capturing
+	 * the manual section verbatim for config_save(). Sections: 0 = preamble,
+	 * 1 = in-app, 2 = manual; a markerless file is treated as all manual. */
 	char *pre = NULL;
 	size_t prelen = 0, precap = 0;
 	char *man = NULL;

@@ -17,12 +17,10 @@
 
 /* theme.c - the built-in color presets and the per-color override table.
  *
- * The whole UI reads its colors from one VpTheme (WM.theme); there are no
- * hardcoded RGBs left in the drawing code. Preset 0 ("midnight") reproduces the
- * original hardcoded look exactly, so theming is invisible until the user opts
- * into another preset. New presets are just another row in g_themes[]. The
- * field table (g_fields[]) lets the config and the Appearance editor address any
- * individual color by a stable name. */
+ * The whole UI reads its colors from one VpTheme (WM.theme). Preset 0
+ * ("midnight") reproduces the original hardcoded look, so theming is invisible
+ * until the user opts into another preset. g_fields[] lets the config and the
+ * Appearance editor address any individual color by a stable name. */
 #define _GNU_SOURCE
 #include "viewpoint.h"
 

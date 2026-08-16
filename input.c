@@ -17,9 +17,7 @@
 
 /* input.c - input routing: keyboard (WM chords vs. forward-to-app) and mouse
  * (focus, title-bar drag-move, border-resize, content forwarding, taskbar).
- * Two mouse sources feed one source-agnostic model (mouse_event): notcurses in
- * a GUI terminal, and our own GPM connection on the bare Linux console. Exactly
- * one is active per run - see the GPM block at the bottom for why.
+ * notcurses and GPM (bare console) both feed one source-agnostic mouse_event.
  */
 #define _GNU_SOURCE
 #include "viewpoint.h"
@@ -508,13 +506,9 @@ void keymap_unbind_action(VpConfig *cfg, vp_action act)
 	}
 }
 
-/* Effective modifier mask, expressed in the NCKEY_MOD_* bits the keymap uses.
- * notcurses carries modifiers two ways and does NOT keep them in sync (see the
- * "FIXME for abi4" on ncinput): the deprecated ni->alt/shift/ctrl bools (set by
- * the legacy path, e.g. Konsole's ESC-prefixed Alt arrives as alt=1) and the
- * ni->modifiers bitmask (set by the kitty/CSI-u path, where e.g. Ctrl+c arrives
- * as id='c' with NCKEY_MOD_CTRL and the bool left clear). Consult both, or
- * Ctrl chords silently vanish on terminals that use the newer protocol. */
+/* Effective modifier mask. notcurses carries modifiers two ways that aren't
+ * kept in sync (legacy ni->alt/shift/ctrl bools vs. the kitty/CSI-u
+ * ni->modifiers bitmask) - consult both or chords vanish on some terminals. */
 static unsigned eff_mods(const ncinput *ni)
 {
 	unsigned mods = ni->modifiers;
@@ -632,11 +626,9 @@ bool input_handle_key(WM *wm, const ncinput *ni)
 
 	unsigned mods = eff_mods(ni);
 
-	/* Normalize the keypress to a chord id the keymap can match. The keymap
-     * stores letters lowercased (so SHIFT alone expresses the upper case), but
-     * notcurses uppercases ASCII letters whenever Ctrl or Shift is held (see
-     * vt_send_key) - so e.g. a bound shift+a / ctrl+a arrives as 'A'. Fold it
-     * back down exactly as the capture path does (keymap_chord_from_input). */
+	/* Fold back to lowercase, matching keymap_chord_from_input: notcurses
+	 * uppercases ASCII letters when Ctrl/Shift is held, but the keymap stores
+	 * them lowercased so SHIFT alone expresses the upper case. */
 	uint32_t id = ni->id;
 	if (id < 0x80 && isalpha((int)id)) {
 		id = (uint32_t)tolower((int)id);
@@ -946,12 +938,9 @@ static void update_drag(WM *wm, int y, int x)
 	}
 
 	if (wm->drag == DRAG_MOVE) {
-		/* Dragging a maximized window's title bar un-maximizes it: it springs
-         * back to its pre-maximize size and follows the cursor, like a modern
-         * desktop. We test for real displacement so a click that doesn't move
-         * (incl. the press/release of a double-click) leaves it maximized. The
-         * grab offset is rescaled across the now-shorter title bar so the
-         * pointer stays at the same proportional spot along it. */
+		/* Dragging a maximized window's title bar un-maximizes it and rescales
+		 * the grab offset proportionally. Requires real displacement, so a
+		 * stationary click (incl. a double-click) leaves it maximized. */
 		if (win->maximized && (x - wm->drag_off_x != win->x ||
 				       y - wm->drag_off_y != win->y)) {
 			wm->drag_off_x = (win->w > 1) ? wm->drag_off_x *
@@ -1033,8 +1022,7 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
 	Window *win = wm_window_at(wm, y, x);
 	if (!win) {
 		/* Empty desktop: a launcher icon may have been grabbed. Begin a drag;
-         * a release that never moved it is treated as a plain click (which then
-         * opens settings / quits - see mouse_release). */
+		 * a release that never moved it is a plain click (see mouse_release). */
 		vp_layer *icon = NULL;
 		if (settings_icon_hit(wm, y, x)) {
 			icon = wm->settings.icon;
@@ -1060,8 +1048,7 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
 	int relx = x - win->x;
 
 	if (rely == 0) {
-		/* The title bar's corner cells (┌ ┐) resize diagonally; the rest of
-         * the top row is buttons or drag-to-move. */
+		/* The corner cells (┌ ┐) resize diagonally; the rest is buttons/move. */
 		int corner = 0;
 		if (relx == 0)
 			corner = RZ_TOP | RZ_LEFT;
@@ -1095,8 +1082,7 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
 		case HIT_MOVE:
 			break;
 		}
-		/* Move region: a second click here within VP_DBLCLICK_MS toggles
-         * maximize (the classic title-bar double-click). */
+		/* A second click here within VP_DBLCLICK_MS toggles maximize. */
 		uint64_t t = now_ns();
 		if (wm->last_titleclick_win == win->id &&
 		    t - wm->last_titleclick_ns <=
@@ -1107,10 +1093,9 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
 		}
 		wm->last_titleclick_ns = t;
 		wm->last_titleclick_win = win->id;
-		/* Don't un-maximize yet: a maximized window stays maximized through the
-         * press so a stationary second click (double-click) can restore it via
-         * wm_toggle_maximize. update_drag drops the maximized flag only once the
-         * pointer actually moves, which turns the click into a move-drag. */
+		/* Stay maximized through the press so a stationary second click can
+		 * restore via wm_toggle_maximize; update_drag drops the flag once the
+		 * pointer actually moves. */
 		wm->drag = DRAG_MOVE;
 		wm->drag_win = win->id;
 		wm->drag_off_x = relx;
@@ -1138,9 +1123,8 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
 
 static void mouse_release(WM *wm, int btn, int y, int x, unsigned mods)
 {
-	/* Desktop-icon drop. Apply the final position, then: if the tile actually
-     * moved, persist its new spot to the config; otherwise the press+release was
-     * a plain click, so run the icon's normal action. */
+	/* Desktop-icon drop: persist the new position if it moved, otherwise treat
+	 * the press+release as a plain click and run the icon's action. */
 	if (wm->drag == DRAG_ICON) {
 		vp_layer *icon = wm->drag_icon;
 		update_drag(wm, y, x);
@@ -1180,11 +1164,8 @@ static void mouse_release(WM *wm, int btn, int y, int x, unsigned mods)
 		return;
 	}
 
-	/* Apply the final move/resize from the release position. Terminals that
-     * report button-held motion (drag) have already been updating live; those
-     * that report only press+release (e.g. Konsole) get the whole drag applied
-     * here, so the window snaps to the drop point either way. update_drag also
-     * re-evaluates the snap zone from this final position. */
+	/* Apply the final move/resize from the release position, so terminals that
+	 * only report press+release (e.g. Konsole) still snap to the drop point. */
 	if (wm->drag == DRAG_MOVE || wm->drag == DRAG_RESIZE) {
 		update_drag(wm, y, x);
 	}
@@ -1192,12 +1173,9 @@ static void mouse_release(WM *wm, int btn, int y, int x, unsigned mods)
 	if (wm->drag == DRAG_MOVE && wm->snap_preview != SNAP_NONE) {
 		Window *win = find_by_id(wm, wm->drag_win);
 		if (win && wm->snap_preview == SNAP_MAX) {
-			/* Dropping at the top edge maximizes. A real drag already cleared
-             * the maximized flag via displacement, so toggle just maximizes,
-             * saving the drop geometry as the restore target. Skip when already
-             * maximized: a plain click on a maximized window's title bar (which
-             * sits at the top edge) also arms SNAP_MAX, and must not toggle it
-             * back off. */
+			/* Dropping at the top edge maximizes. Skip if already maximized:
+			 * a plain click on a maximized title bar also arms SNAP_MAX and
+			 * must not toggle it back off. */
 			if (!win->maximized) {
 				wm_toggle_maximize(wm, win);
 			}
@@ -1208,10 +1186,8 @@ static void mouse_release(WM *wm, int btn, int y, int x, unsigned mods)
 			window_set_geometry(win, gx, gy, gw, gh);
 		}
 	} else if (wm->drag == DRAG_MOVE) {
-		/* Plain (non-snap) drop: re-clamp on-screen so a window dragged toward
-         * an edge can't be stranded with only a sliver visible. The live drag
-         * intentionally allows it to overhang; the drop pulls it back, matching
-         * the keyboard move path (wm_move_focused -> wm_clamp_onscreen). */
+		/* Plain (non-snap) drop: re-clamp on-screen (the live drag allows
+		 * overhang; the drop pulls it back), matching the keyboard move path. */
 		Window *win = find_by_id(wm, wm->drag_win);
 		if (win) {
 			wm_clamp_onscreen(wm, win);
@@ -1301,9 +1277,8 @@ void input_route_mouse(WM *wm, const ncinput *ni)
 			mouse_event(wm, MEV_RELEASE, btn, y, x, mods);
 		} else if (wm->drag != DRAG_NONE ||
 			   ni->evtype == NCTYPE_REPEAT) {
-			/* notcurses reports a held-button drag as a fresh PRESS, so once a
-             * drag is in progress we treat any non-release button event as
-             * motion (the REPEAT case covers terminals that do distinguish). */
+			/* notcurses reports a held-button drag as a fresh PRESS, so
+			 * treat any non-release event as motion once dragging. */
 			mouse_event(wm, MEV_MOTION, btn, y, x, mods);
 		} else {
 			mouse_event(wm, MEV_PRESS, btn, y, x, mods);
@@ -1331,11 +1306,9 @@ void input_route_mouse(WM *wm, const ncinput *ni)
 }
 
 /* ------------------------------------------------------------------------- */
-/* GPM - the bare Linux console mouse. Used only on a real VT, and only when    */
-/* notcurses' own mouse decoding is left off (we never enable both: two libgpm  */
-/* clients in one process collide over GPM's shared global connection state).   */
-/* Unlike notcurses, we request the full event mask, so bare hover motion       */
-/* (GPM_MOVE) is delivered - that's what lets the software pointer track.        */
+/* GPM - the bare Linux console mouse, used only when notcurses' own mouse    */
+/* decoding is off (both would collide over GPM's shared connection state).  */
+/* We request the full event mask so hover motion (GPM_MOVE) is delivered.   */
 /* ------------------------------------------------------------------------- */
 
 #include <gpm.h>

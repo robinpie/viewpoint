@@ -17,19 +17,12 @@
 
 /* sixel.c - inline sixel graphics.
  *
- * notcurses owns the screen, so we cannot pass raw sixel bytes through to the
- * host terminal. Instead the libvterm DCS fallback (in vt_bridge.c) hands us the
- * sixel payload and we decode it with libsixel; the decoded pixels are handed to
- * the compositor as a graphic attached to the window's content layer.
- *
- * What is left here is only what the terminal emulator knows and the compositor
- * does not: where an image belongs in the scrollback. Each image is anchored to
- * an absolute scrollback row (Window.scroll_base) so it scrolls and persists
- * with its text, and sixel_sync resolves those anchors to view-relative rows.
- * Everything after that - whether a bitmap is on screen, clipped, occluded by
- * another window, or has to be re-emitted because the stack moved - is the
- * compositor's problem, and is no longer duplicated (differently, and wrongly)
- * at each call site that happened to move a window.
+ * notcurses owns the screen, so raw sixel bytes can't pass through. The
+ * libvterm DCS fallback (vt_bridge.c) hands us the payload; we decode it with
+ * libsixel and hand the pixels to the compositor as a graphic on the window's
+ * content layer. What's left here is what the compositor doesn't know: each
+ * image is anchored to an absolute scrollback row (Window.scroll_base) so it
+ * scrolls with its text, and sixel_sync resolves anchors to view-relative rows.
  */
 #define _GNU_SOURCE
 #include "viewpoint.h"
@@ -152,12 +145,9 @@ void sixel_images_clear(Window *w)
 	w->nimages = 0;
 }
 
-/* The inner app overwrote a region of the live screen (a clear, an alt-screen
- * switch, a TUI redraw). Any image whose on-screen cells intersect the damaged
- * rectangle is now stale - the text underneath is meant to show through - so
- * drop it, mirroring how a real sixel terminal discards pixels under rewritten
- * cells. Damage from scrolling arrives via moverect (a full repaint), not here,
- * so scrolled images are preserved and merely repositioned. */
+/* The inner app overwrote a region of the live screen; drop any image whose
+ * on-screen cells intersect it, mirroring a real sixel terminal. Scroll damage
+ * arrives via moverect instead, so scrolled images are merely repositioned. */
 void sixel_damage(Window *w, int row0, int row1, int col0, int col1)
 {
 	for (int i = 0; i < w->nimages;) {
@@ -321,15 +311,9 @@ void sixel_answer_xtsmgraphics(Window *w, const long *args, int argcount)
 	(void)argcount;
 }
 
-/* Resolve every image's absolute scrollback anchor against the window's current
- * view, and evict the ones that have scrolled out of retained history.
- *
- * That is the whole job now. Deciding whether a re-anchored bitmap is on screen
- * - does it fit inside the window, has the window been dragged off an edge, is
- * another window or the taskbar covering it, does it touch the last physical
- * row - used to live here too, tangled together with blitting and with a
- * separate "drop everything and start over" path for scene changes. It belongs
- * to whoever knows the whole scene, so it moved to the compositor. */
+/* Resolve every image's absolute scrollback anchor against the window's
+ * current view, and evict the ones that scrolled out of retained history.
+ * Whether a re-anchored bitmap is actually visible is the compositor's call. */
 void sixel_sync(Window *w)
 {
 	if (w->nimages == 0) {

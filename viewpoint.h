@@ -15,16 +15,9 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* viewpoint.h - shared declarations for the viewpoint terminal multiplexer.
- *
- * A single-process, single-threaded, poll(2)-driven WM that presents floating
- * "windows", each running a shell/app in its own PTY + libvterm instance.
- *
- * Everything that reaches the screen goes through the compositor (compositor.h)
- * as a layer: this file's job is the *policy* - which windows exist, which one
- * has focus, where they sit - while the compositor owns stacking, visibility,
- * pixel graphics and presentation. No code outside compositor.c calls
- * notcurses_render or moves a plane in the z-order.
+/* Shared declarations for viewpoint, a poll(2)-driven WM presenting floating
+ * windows over PTY + libvterm instances. This file owns policy (which windows
+ * exist, focus, placement); compositor.h owns stacking and presentation.
  */
 #ifndef VIEWPOINT_H
 #define VIEWPOINT_H
@@ -54,10 +47,7 @@
 
 #define VP_TITLE_MAX 128
 
-/* Per-window scrollback defaults: how many lines that scroll off the top are
- * retained, and how many lines a single mouse-wheel notch scrolls the history
- * view. Both are overridable via the config file / in-app Terminal settings;
- * these are just the starting values, and the bounds the editor clamps to. */
+/* Per-window scrollback defaults; overridable via config / in-app settings. */
 #define VP_SCROLLBACK_MAX 2000
 #define VP_SCROLL_STEP 3
 #define VP_SCROLLBACK_LIMIT 100000 /* upper bound on retained lines */
@@ -112,10 +102,9 @@ typedef enum {
 	FIT_TILE, /* native size, tiled across the desktop */
 } vp_bg_fit;
 
-/* A full color palette + desktop-background spec. The active theme is a value
- * copy on the WM (WM.theme): a chosen preset, then any per-color/background
- * overrides from the config laid on top. Every chrome color reads from here, so
- * there are no hardcoded RGBs left in the drawing code. See theme.c. */
+/* A full color palette + desktop-background spec. WM.theme is a value copy:
+ * a chosen preset with any per-color/background config overrides laid on top.
+ * See theme.c. */
 typedef struct VpTheme {
 	const char *name; /* stable id used in the config ("theme = <name>") */
 
@@ -238,42 +227,33 @@ typedef struct VpConfig {
 
 	uint32_t toggle_key; /* the always-on INTERPRET↔PASSTHROUGH key */
 
-	/* Terminal behavior. scrollback_max is the per-window history cap (lines);
-     * scroll_step is how many lines one mouse-wheel notch scrolls. Both seed
-     * from the VP_* defaults and are editable in-app (Terminal settings). */
+	/* Terminal behavior: scrollback cap (lines) and mouse-wheel scroll step.
+	 * Editable in-app (Terminal settings). */
 	int scrollback_max;
 	int scroll_step;
 
-	/* Desktop launcher icon positions (top-left cell), as stored in the config.
-     * -1 means "unset": fall back to the built-in placement (Settings: top-left;
-     * Exit: auto-anchored to the bottom-right). Set once the user drags an icon,
-     * and written back to the in-app config section by config_save(). */
+	/* Desktop launcher icon positions (top-left cell). -1 = unset, fall back
+	 * to the built-in placement. Set once the user drags an icon. */
 	int settings_icon_y, settings_icon_x;
 	int exit_icon_y, exit_icon_x;
 	int die_icon_y, die_icon_x;
 
-	/* Theming. theme_name is the chosen preset (NULL = the default preset).
-	 * The background fields override the preset's desktop background when set:
-	 * bg_mode is a vp_bg_mode or -1 ("use the theme's"); bg_fit is a vp_bg_fit;
-	 * bg_glyph / bg_image_path are heap strings or NULL. Per-color overrides are
-	 * laid on top of the preset (see VpColorOverride). */
+	/* Theming: chosen preset (NULL = default), background overrides (-1/NULL
+	 * = inherit from preset), and per-color overrides (VpColorOverride). */
 	char *theme_name;
 	int bg_mode; /* vp_bg_mode, or -1 = inherit from the preset */
 	int bg_fit; /* vp_bg_fit (only meaningful for BG_IMAGE) */
 	char *bg_glyph; /* SOLID/PATTERN glyph override, or NULL */
 	char *bg_image_path; /* BG_IMAGE source file, or NULL */
 
-	/* When true, switching the theme preset in-app keeps the per-color and
-	 * background overrides layered on top; when false (default), a theme switch
-	 * discards them so the new preset applies in full. */
+	/* If true, an in-app theme switch keeps per-color/background overrides. */
 	bool keep_customizations;
 
 	struct VpColorOverride *color_overrides; /* malloc'd list, or NULL */
 	int n_color_overrides, color_cap;
 
-	/* Verbatim text of the file's hand-written "manual" section, captured at
-     * load. config_save() preserves it untouched and only rewrites the
-     * app-managed section below it. NULL if there was none. */
+	/* Verbatim text of the file's hand-written "manual" section; preserved
+	 * untouched by config_save(). NULL if there was none. */
 	char *manual_text;
 } VpConfig;
 
@@ -310,13 +290,9 @@ typedef struct sb_line {
 	int cols;
 } sb_line;
 
-/* A decoded sixel image belonging to a window. The pixels live in a compositor
- * graphic attached to the window's content layer; this struct only holds what
- * the terminal emulator knows and the compositor does not - where in the
- * scrollback the image is pinned. Anchoring to an absolute scrollback row is
- * what makes an image scroll and persist with the text it was printed next to;
- * sixel_sync translates that anchor into the current on-screen row each frame,
- * and the compositor decides from there whether the bitmap is visible. */
+/* A decoded sixel image anchored to an absolute scrollback row, so it scrolls
+ * and persists with the text it was printed next to. sixel_sync translates
+ * the anchor into the current on-screen row each frame. */
 typedef struct vp_image {
 	vp_graphic *gfx; /* compositor-owned bitmap (owns the decoded pixels) */
 	int64_t abs_row; /* absolute scrollback anchor of the top-left cell */
@@ -335,9 +311,7 @@ typedef struct Window {
 	VTerm *vt;
 	VTermScreen *vts;
 
-	/* Compositor layers: the decoration (border + title bar) and the inner
-	 * terminal grid that rides it as a sublayer. Moving, raising or hiding
-	 * the frame carries the content and any images with it. */
+	/* Frame (border + title bar) and the content grid riding it as a sublayer. */
 	vp_layer *frame;
 	vp_layer *content;
 
@@ -353,44 +327,38 @@ typedef struct Window {
 
 	bool dead; /* child exited; destroy after the current loop pass */
 
-	/* Accumulated screen-damage since the last vt_render, so the sweep can repaint
-     * only the rows that actually changed instead of the whole grid. dmg_all
-     * forces a full repaint (scrolls/resizes/scrollback view changes); otherwise
-     * dmg_valid means [dmg_r0, dmg_r1) is the damaged live-screen row range. */
+	/* Damage since the last vt_render. dmg_all forces a full repaint; otherwise
+	 * dmg_valid means [dmg_r0, dmg_r1) is the damaged row range. */
 	bool dmg_all;
 	bool dmg_valid;
 	int dmg_r0, dmg_r1;
 
-	/* inner cursor position (content-relative) and visibility, tracked from
-     * the vterm movecursor / settermprop callbacks */
+	/* inner cursor position (content-relative) and visibility, from the vterm
+	 * movecursor / settermprop callbacks */
 	int currow, curcol;
 	bool cursor_visible;
 
-	/* Scrollback ring: lines that scrolled off the top, oldest..newest. Lazily
-     * allocated on the first push. sb_offset is how many lines the view is
-     * scrolled up into history (0 = the live screen). See vt_bridge.c. */
+	/* Scrollback ring, oldest..newest, lazily allocated on first push.
+	 * sb_offset is how many lines the view is scrolled into history. */
 	sb_line *sb;
 	int sb_cap, sb_count, sb_head;
 	int sb_offset;
 	int sb_max; /* logical history cap for this window (from config) */
 	bool app_mouse; /* the inner app enabled mouse reporting (VTERM_PROP_MOUSE) */
 
-	/* Sixel graphics. scroll_base is the absolute index of the top live-screen
-	 * row (++ on sb_pushline, -- on sb_popline): the coordinate space images are
-	 * anchored in. sixbuf accumulates a sixel DCS payload across libvterm
-	 * fragments; images is the list of live image planes. See sixel.c. */
+	/* Sixel graphics (see sixel.c). scroll_base is the absolute index of the
+	 * top live-screen row, the coordinate space images are anchored in.
+	 * sixbuf accumulates a sixel DCS payload across libvterm fragments. */
 	int64_t scroll_base;
 	char *sixbuf;
 	size_t sixlen, sixcap;
 	bool six_overflow; /* payload exceeded the cap; discard until the final frag */
-	int six_pending_lf; /* line feeds owed after an image, flushed by vt_feed
-			     * (feeding them inside the DCS callback would re-enter
-			     * the parser) */
+	int six_pending_lf; /* line feeds owed after an image; flushed by vt_feed to
+			     * avoid re-entering the parser from the DCS callback */
 	vp_image *images;
 	int nimages, images_cap;
 
-	/* CLOCK_MONOTONIC (ns) before which window_refresh_title skips its /proc
-     * poll - throttles title updates to VP_TITLE_POLL_MS. */
+	/* CLOCK_MONOTONIC (ns) throttling window_refresh_title's /proc poll. */
 	uint64_t title_poll_ns;
 
 	char title[VP_TITLE_MAX];
@@ -482,15 +450,12 @@ typedef struct WM {
 	vp_layer *exit_icon;
 	vp_layer *die_icon;
 
-	/* Bare Linux console vs. a GUI terminal emulator. On the console we own a
-     * GPM connection directly and draw a software pointer; in a GUI terminal
-     * notcurses decodes the mouse and the emulator draws the hardware cursor.
-     * The two mouse sources are mutually exclusive - enabling both makes the
-     * two libgpm clients in-process fight over GPM's shared global state. */
+	/* Bare console (we own GPM + draw a software pointer) vs. GUI terminal
+	 * (notcurses decodes the mouse, the emulator draws the cursor). Mutually
+	 * exclusive: both would fight over GPM's shared global state. */
 	bool console;
 
-	/* software mouse pointer - drawn only on the console, where the full-screen
-     * repaint erases the cell-inverting pointer gpm would otherwise draw. */
+	/* software mouse pointer, drawn only on the console */
 	vp_layer *pointer;
 	bool draw_cursor;
 	int mouse_y, mouse_x;
@@ -510,9 +475,8 @@ typedef struct WM {
 	vp_snapzone snap_preview; /* currently-shown snap outline */
 	vp_layer *snap_layer;
 
-	/* Desktop-icon drag (DRAG_ICON). drag_off_{x,y} hold the grab offset within
-     * the tile; drag_icon_{y,x}0 are the tile's top-left at grab time, so a
-     * release that didn't move it can be treated as a plain click instead. */
+	/* Desktop-icon drag (DRAG_ICON): tile's top-left at grab time, so a release
+	 * that didn't move it can be treated as a plain click instead. */
 	vp_layer *drag_icon;
 	int drag_icon_y0, drag_icon_x0;
 
@@ -526,11 +490,9 @@ typedef struct WM {
 	VpConfig config;
 	Settings settings;
 
-	/* Active theme (a value copy: preset + config overrides), and the desktop
-	 * background. For BG_IMAGE, bg_visual holds the decoded image (retained so it
-	 * re-blits cheaply on resize/theme change) and bg_layer is the backdrop-band
-	 * layer the blitted bitmap hangs off (as a sublayer, so one destroy takes the
-	 * whole background down). */
+	/* Active theme (preset + config overrides) and the desktop background. For
+	 * BG_IMAGE, bg_visual is the decoded image (retained for cheap re-blit) and
+	 * bg_layer is the backdrop layer it hangs off. */
 	VpTheme theme;
 	struct ncvisual *bg_visual;
 	vp_layer *bg_layer;
@@ -664,20 +626,15 @@ void vt_reply(Window *w, const char *bytes, size_t len);
 void sixel_accumulate(Window *w, const char *command, size_t commandlen,
 		      const char *str, size_t len, bool initial, bool final);
 
-/* Re-anchor every image from its absolute scrollback row to the row it now
- * occupies in the window's view, and evict images that have scrolled out of
- * retained history. Whether a re-anchored image is actually drawn - clipping,
- * occlusion, blitting - is the compositor's decision, not ours. Called from the
- * content painter, before the grid sweep. */
+/* Re-anchor every image to its current on-screen row, evicting any that have
+ * scrolled out of retained history. Called before the grid sweep. */
 void sixel_sync(Window *w);
 
 /* Drop every image and its pixels (used on screen clear, resize, teardown). */
 void sixel_images_clear(Window *w);
 
-/* The inner app overwrote live-screen cells in [row0,row1) x [col0,col1) (a
- * clear, an alt-screen switch, a TUI redraw). Drop any image whose footprint
- * intersects that rectangle, so rewritten text shows through instead of stale
- * pixels. Coordinates are live-screen rows/cols. */
+/* The inner app overwrote live-screen cells in [row0,row1) x [col0,col1);
+ * drop any image whose footprint intersects that rectangle. */
 void sixel_damage(Window *w, int row0, int row1, int col0, int col1);
 
 /* Free all per-window sixel state: the accumulation buffer and the images. */
@@ -728,16 +685,13 @@ void wm_clamp_onscreen(WM *wm, Window *win);
 void wm_handle_resize(WM *wm);
 void wm_render(WM *wm);
 
-/* Resolve the config's theme + overrides into wm->theme and apply it live:
- * recolor the persistent base planes (taskbar, cursor), repaint the desktop
- * background, and mark all chrome dirty. Safe to call before the taskbar/icons
- * exist (seeds the theme at startup) and on every later theme change. */
+/* Resolve the config's theme + overrides into wm->theme and apply it live to
+ * the taskbar, cursor, background, and chrome. */
 void theme_apply(WM *wm);
 
 /* (Re)paint the desktop background for the current theme: SOLID/PATTERN drive
- * the std plane's base cell (+ a one-shot pattern paint); IMAGE blits the
- * decoded file as pixel bitmap plane(s) below every window. Called from
- * theme_apply, wm_init and wm_handle_resize. */
+ * the std plane's base cell; IMAGE blits the decoded file as pixel bitmap(s)
+ * below every window. */
 void background_apply(WM *wm);
 
 /* Destroy the background image plane(s) and retained visual (teardown / before
