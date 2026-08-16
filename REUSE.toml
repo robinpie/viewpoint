@@ -12,6 +12,9 @@ path = [
     ".gitignore",
     ".gitattributes",
     "screenshotForReadme.png",
+    "tests/README.md",
+    "tests/Makefile",
+    "tests/.gitignore",
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 robinpie <robin413@protonmail.com>"

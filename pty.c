@@ -51,6 +51,10 @@ pid_t pty_spawn(int rows, int cols, int *master_out)
 		signal(SIGTERM, SIG_DFL);
 		signal(SIGPIPE, SIG_DFL);
 
+		sigset_t none;
+		sigemptyset(&none);
+		sigprocmask(SIG_SETMASK, &none, NULL);
+
 		/* libvterm emulates xterm-256color; advertise that to the child. */
 		setenv("TERM", "xterm-256color", 1);
 		unsetenv("LINES");

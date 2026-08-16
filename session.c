@@ -789,6 +789,10 @@ static void reap_server_children(void)
 
 int session_server_main(void)
 {
+	sigset_t none;
+	sigemptyset(&none);
+	sigprocmask(SIG_SETMASK, &none, NULL);
+
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGCHLD, SIG_IGN);
 
