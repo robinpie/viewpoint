@@ -1357,6 +1357,11 @@ void settings_scroll(WM *wm, int dir)
 static void draw_border(WM *wm, struct ncplane *p, int W, int H,
 			const char *title)
 {
+	/* The frame is the first thing drawn after ncplane_erase(), which keeps
+	 * the plane's channels - so set the background here rather than
+	 * inheriting whatever the previous paint left behind (a theme switch
+	 * would otherwise frame the panel in the old theme's panel_bg). */
+	vp_setbg(p, wm->theme.panel_bg);
 	vp_setfg(p, wm->theme.panel_accent);
 	ncplane_putegc_yx(p, 0, 0, "┌", NULL);
 	ncplane_putegc_yx(p, 0, W - 1, "┐", NULL);
@@ -1370,7 +1375,10 @@ static void draw_border(WM *wm, struct ncplane *p, int W, int H,
 		ncplane_putegc_yx(p, r, 0, "│", NULL);
 		ncplane_putegc_yx(p, r, W - 1, "│", NULL);
 	}
-	vp_setfg(p, wm->theme.panel_sel_fg);
+	/* panel_fg, not panel_sel_fg: the title sits on panel_bg, and the
+	 * selection foreground is only guaranteed to contrast with panel_sel_bg
+	 * (on a light preset it is white-on-white). */
+	vp_setfg(p, wm->theme.panel_fg);
 	ncplane_putstr_yx(p, 0, 2, title);
 }
 
