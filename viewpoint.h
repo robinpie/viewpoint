@@ -345,6 +345,7 @@ typedef struct Window {
 	int sb_offset;
 	int sb_max; /* logical history cap for this window (from config) */
 	bool app_mouse; /* the inner app enabled mouse reporting (VTERM_PROP_MOUSE) */
+	bool alt_screen; /* on the alternate buffer (VTERM_PROP_ALTSCREEN) */
 
 	/* Sixel graphics (see sixel.c). scroll_base is the absolute index of the
 	 * top live-screen row, the coordinate space images are anchored in.

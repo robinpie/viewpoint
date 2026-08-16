@@ -102,10 +102,22 @@ static int cb_settermprop(VTermProp prop, VTermValue *val, void *user)
 		w->app_mouse = val->number != VTERM_PROP_MOUSE_NONE;
 		break;
 	case VTERM_PROP_ALTSCREEN:
+		w->alt_screen = val->boolean != 0;
+		/* The alt screen never feeds the history ring, so a held offset
+		 * would splice primary-screen history above the app's rows.
+		 * Snap back to the live screen for the duration. */
+		if (w->sb_offset != 0) {
+			w->sb_offset = 0;
+			/* drop the title bar's scrolled-back indicator */
+			window_damage_frame(w);
+		}
 		/* Images are anchored in shared scrollback coordinates and can't
 		 * tell the two buffers apart, so a primary-screen sixel would
 		 * bleed through the alt screen. Drop them on any switch. */
 		sixel_images_clear(w);
+		/* libvterm damages the whole screen across a switch either way (the
+		 * entry erase, and an explicit damagescreen on exit), so the grid
+		 * repaint is already covered. */
 		break;
 	/* OSC window titles are intentionally ignored: the title is derived
 	 * from the PTY's foreground program / shell cwd (window_refresh_title). */
@@ -384,6 +396,13 @@ void vt_init(Window *w)
 	w->vts = vterm_obtain_screen(w->vt);
 	vterm_screen_set_callbacks(w->vts, &screen_cbs, w);
 	vterm_screen_set_unrecognised_fallbacks(w->vts, &state_fallbacks, w);
+	/* Allocate the alternate buffer. libvterm leaves it off by default, and
+	 * without it DECSET 1049/1047/47 is silently refused (its settermprop
+	 * bails when the buffer is absent) - so htop and every other full-screen
+	 * app draws straight onto the primary buffer, and the 1049l on exit has
+	 * nothing to restore, leaving the app's frame stranded on the shell's
+	 * screen. Must precede the reset that establishes the active buffer. */
+	vterm_screen_enable_altscreen(w->vts, 1);
 	vterm_screen_reset(w->vts, 1);
 
 	vterm_output_set_callback(w->vt, cb_output, w);
@@ -430,6 +449,12 @@ void vt_resize(Window *w, int rows, int cols)
 
 void vt_scroll(Window *w, int delta)
 {
+	/* History belongs to the primary screen; nothing scrolls off the alt one,
+	 * so scrolling there would only drag unrelated shell output into view
+	 * behind the running app. Inert until it switches back. */
+	if (w->alt_screen) {
+		return;
+	}
 	int off = w->sb_offset + delta;
 	if (off < 0)
 		off = 0;
