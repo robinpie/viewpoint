@@ -62,6 +62,7 @@ static const grid_entry g_grid_entries[] = {
 	{ "⌨", "Keybindings", SETTINGS_VIEW_KEYBINDINGS },
 	{ "▤", "Terminal", SETTINGS_VIEW_TERMINAL },
 	{ "▦", "Appearance", SETTINGS_VIEW_APPEARANCE },
+	{ "▣", "Desktop Icons", SETTINGS_VIEW_ICONS },
 };
 #define GRID_ENTRY_COUNT \
 	((int)(sizeof(g_grid_entries) / sizeof(g_grid_entries[0])))
@@ -98,6 +99,14 @@ static int *term_field(WM *wm, int i)
 	return (int *)((char *)&wm->config + g_term_rows[i].field_off);
 }
 
+/* What in-app text entry is currently building (Settings.edit_kind). */
+enum {
+	EDIT_BG_IMAGE = 0, /* desktop background image path */
+	EDIT_COLOR, /* a color override, naming edit_color_idx */
+	EDIT_ICON_LABEL, /* a launcher's caption, naming edit_launcher */
+	EDIT_ICON_CMD, /* a launcher's command */
+};
+
 static void clamp_icon_pos(const WM *wm, int h, int w, int *y, int *x)
 {
 	int maxy = (int)wm->scr_rows - (wm->taskbar ? 1 : 0) - h;
@@ -113,6 +122,7 @@ static void clamp_icon_pos(const WM *wm, int h, int w, int *y, int *x)
 }
 
 static int app_total_rows(void); /* Appearance view row count (defined below) */
+static int icons_total_rows(const WM *wm); /* Desktop Icons view row count */
 
 static int total_rows(void)
 {
@@ -157,6 +167,8 @@ static void panel_geom(const WM *wm, int *y, int *x, int *h, int *w)
 			rows = TERM_ROWS;
 		} else if (wm->settings.view == SETTINGS_VIEW_APPEARANCE) {
 			rows = app_total_rows();
+		} else if (wm->settings.view == SETTINGS_VIEW_ICONS) {
+			rows = icons_total_rows(wm);
 		}
 		H = rows + PANEL_CHROME;
 		if (H < PANEL_CHROME + 1)
@@ -194,6 +206,17 @@ enum {
 static int app_total_rows(void)
 {
 	return APP_FIXED_ROWS + vp_theme_field_count();
+}
+
+/* The Desktop Icons view: a row per configured launcher, then an "add" row that
+ * acts as the button for creating one. */
+static int icons_total_rows(const WM *wm)
+{
+	return wm->config.nlaunchers + 1;
+}
+static bool is_add_row(const WM *wm, int row)
+{
+	return row == wm->config.nlaunchers;
 }
 
 static void clamp_scroll_n(WM *wm, int n)
@@ -278,6 +301,9 @@ static int list_len(const WM *wm)
 	if (wm->settings.view == SETTINGS_VIEW_APPEARANCE) {
 		return app_total_rows();
 	}
+	if (wm->settings.view == SETTINGS_VIEW_ICONS) {
+		return icons_total_rows(wm);
+	}
 	return 0;
 }
 
@@ -358,6 +384,65 @@ static void settings_icon_geom(const WM *wm, int *y, int *x)
 	clamp_icon_pos(wm, ICON_H, ICON_W, y, x);
 }
 
+/* ----- the shared desktop-tile look ---------------------------------------
+ *
+ * Every desktop icon is the same tile: a rounded border, a glyph on the first
+ * line and a caption centered under it. Only the palette, glyph and caption
+ * differ, so they are drawn by one painter rather than three that can drift. */
+static void draw_icon_tile(struct ncplane *p, int h, int w, vp_rgb fg,
+			   vp_rgb bg, vp_rgb border, vp_rgb glyphc,
+			   const char *glyph, const char *label)
+{
+	if (!p) {
+		return;
+	}
+
+	uint64_t base = 0;
+	ncchannels_set_fg_rgb8(&base, (fg >> 16) & 0xff, (fg >> 8) & 0xff,
+			       fg & 0xff);
+	ncchannels_set_bg_rgb8(&base, (bg >> 16) & 0xff, (bg >> 8) & 0xff,
+			       bg & 0xff);
+	ncplane_set_base(p, " ", 0, base);
+	vp_setbg(p, bg);
+	ncplane_erase(p);
+
+	vp_setfg(p, border);
+	ncplane_putegc_yx(p, 0, 0, "╭", NULL);
+	ncplane_putegc_yx(p, 0, w - 1, "╮", NULL);
+	ncplane_putegc_yx(p, h - 1, 0, "╰", NULL);
+	ncplane_putegc_yx(p, h - 1, w - 1, "╯", NULL);
+	for (int c = 1; c < w - 1; c++) {
+		ncplane_putegc_yx(p, 0, c, "─", NULL);
+		ncplane_putegc_yx(p, h - 1, c, "─", NULL);
+	}
+	for (int r = 1; r < h - 1; r++) {
+		ncplane_putegc_yx(p, r, 0, "│", NULL);
+		ncplane_putegc_yx(p, r, w - 1, "│", NULL);
+	}
+
+	vp_setfg(p, glyphc);
+	ncplane_putegc_yx(p, 1, w / 2 - 1, glyph, NULL);
+
+	/* Captions come from the config, so they can be longer than the tile.
+	 * Truncate to the interior, backing off a partial UTF-8 sequence rather
+	 * than emitting half a codepoint. */
+	char buf[64];
+	int max = w - 2;
+	if (max > (int)sizeof(buf) - 1) {
+		max = (int)sizeof(buf) - 1;
+	}
+	int len = (int)strlen(label);
+	if (len > max) {
+		len = max;
+		while (len > 0 && ((unsigned char)label[len] & 0xc0) == 0x80) {
+			len--;
+		}
+	}
+	snprintf(buf, sizeof(buf), "%.*s", len, label);
+	vp_setfg(p, fg);
+	ncplane_putstr_yx(p, h - 2, 1 + (max - len) / 2, buf);
+}
+
 static void settings_icon_paint(struct ncplane *p, bool full, void *user);
 
 void settings_init(WM *wm)
@@ -381,36 +466,9 @@ static void settings_icon_paint(struct ncplane *p, bool full, void *user)
 {
 	(void)full;
 	WM *wm = user;
-
-	uint64_t base = 0;
-	vp_rgb fg = wm->theme.icon_fg, bg = wm->theme.icon_bg;
-	ncchannels_set_fg_rgb8(&base, (fg >> 16) & 0xff, (fg >> 8) & 0xff,
-			       fg & 0xff);
-	ncchannels_set_bg_rgb8(&base, (bg >> 16) & 0xff, (bg >> 8) & 0xff,
-			       bg & 0xff);
-	ncplane_set_base(p, " ", 0, base);
-	vp_setbg(p, wm->theme.icon_bg);
-	ncplane_erase(p);
-
-	vp_setfg(p, wm->theme.icon_border);
-	ncplane_putegc_yx(p, 0, 0, "╭", NULL);
-	ncplane_putegc_yx(p, 0, ICON_W - 1, "╮", NULL);
-	ncplane_putegc_yx(p, ICON_H - 1, 0, "╰", NULL);
-	ncplane_putegc_yx(p, ICON_H - 1, ICON_W - 1, "╯", NULL);
-	for (int c = 1; c < ICON_W - 1; c++) {
-		ncplane_putegc_yx(p, 0, c, "─", NULL);
-		ncplane_putegc_yx(p, ICON_H - 1, c, "─", NULL);
-	}
-	for (int r = 1; r < ICON_H - 1; r++) {
-		ncplane_putegc_yx(p, r, 0, "│", NULL);
-		ncplane_putegc_yx(p, r, ICON_W - 1, "│", NULL);
-	}
-
-	vp_setfg(p, wm->theme.icon_glyph);
-	ncplane_putegc_yx(p, 1, ICON_W / 2 - 1, "⚙", NULL);
-
-	vp_setfg(p, wm->theme.icon_fg);
-	ncplane_putstr_yx(p, 2, 2, "Settings");
+	draw_icon_tile(p, ICON_H, ICON_W, wm->theme.icon_fg, wm->theme.icon_bg,
+		       wm->theme.icon_border, wm->theme.icon_glyph, "⚙",
+		       "Settings");
 }
 
 void settings_icon_reflow(WM *wm)
@@ -521,39 +579,9 @@ static void die_icon_geom(const WM *wm, int *y, int *x)
 static void draw_exit_tile(WM *wm, struct ncplane *p, const char *glyph,
 			   const char *label)
 {
-	if (!p) {
-		return;
-	}
-
-	uint64_t base = 0;
-	vp_rgb fg = wm->theme.exit_fg, bg = wm->theme.exit_bg;
-	ncchannels_set_fg_rgb8(&base, (fg >> 16) & 0xff, (fg >> 8) & 0xff,
-			       fg & 0xff);
-	ncchannels_set_bg_rgb8(&base, (bg >> 16) & 0xff, (bg >> 8) & 0xff,
-			       bg & 0xff);
-	ncplane_set_base(p, " ", 0, base);
-	vp_setbg(p, wm->theme.exit_bg);
-	ncplane_erase(p);
-
-	vp_setfg(p, wm->theme.exit_border);
-	ncplane_putegc_yx(p, 0, 0, "╭", NULL);
-	ncplane_putegc_yx(p, 0, EXIT_W - 1, "╮", NULL);
-	ncplane_putegc_yx(p, EXIT_H - 1, 0, "╰", NULL);
-	ncplane_putegc_yx(p, EXIT_H - 1, EXIT_W - 1, "╯", NULL);
-	for (int c = 1; c < EXIT_W - 1; c++) {
-		ncplane_putegc_yx(p, 0, c, "─", NULL);
-		ncplane_putegc_yx(p, EXIT_H - 1, c, "─", NULL);
-	}
-	for (int r = 1; r < EXIT_H - 1; r++) {
-		ncplane_putegc_yx(p, r, 0, "│", NULL);
-		ncplane_putegc_yx(p, r, EXIT_W - 1, "│", NULL);
-	}
-
-	vp_setfg(p, wm->theme.exit_glyph);
-	ncplane_putegc_yx(p, 1, EXIT_W / 2 - 1, glyph, NULL);
-
-	vp_setfg(p, wm->theme.exit_fg);
-	ncplane_putstr_yx(p, 2, (EXIT_W - (int)strlen(label)) / 2, label);
+	draw_icon_tile(p, EXIT_H, EXIT_W, wm->theme.exit_fg, wm->theme.exit_bg,
+		       wm->theme.exit_border, wm->theme.exit_glyph, glyph,
+		       label);
 }
 
 /* Painters for the two exit tiles: same tile, different glyph and label. */
@@ -632,6 +660,153 @@ void exit_icon_teardown(WM *wm)
 	wm->die_icon = NULL;
 }
 
+/* ----- the user's own launcher icons --------------------------------------
+ *
+ * One tile per config.launchers entry, drawn like the Settings tile and used
+ * the same way: a click runs the icon's command in a new window, a drag moves
+ * it. Editing the list rebuilds every tile (launcher_icons_rebuild) rather than
+ * patching them, so no layer can be left pointing at an entry that has shifted
+ * along the array or gone away. */
+
+static void launcher_icon_paint(struct ncplane *p, bool full, void *user)
+{
+	(void)full;
+	VpLauncherIcon *ic = user;
+	WM *wm = ic->wm;
+	if (ic->idx < 0 || ic->idx >= wm->config.nlaunchers) {
+		return; /* the list shrank; this layer is on its way out */
+	}
+	const VpLauncher *l = &wm->config.launchers[ic->idx];
+	draw_icon_tile(p, ICON_H, ICON_W, wm->theme.icon_fg, wm->theme.icon_bg,
+		       wm->theme.icon_border, wm->theme.icon_glyph,
+		       l->cmd[0] ? "▸" : "❯", l->label);
+}
+
+/* Resting top-left of launcher `idx`: wherever the user dragged it, else a slot
+ * in a column running down from under the Settings tile, wrapping into the next
+ * column when it reaches the bottom of the screen. */
+static void launcher_icon_geom(const WM *wm, int idx, int *y, int *x)
+{
+	const VpLauncher *l = &wm->config.launchers[idx];
+	if (l->y >= 0) {
+		*y = l->y;
+		*x = l->x;
+	} else {
+		int bottom = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
+		int per_col = (bottom - ICON_Y) / (ICON_H + 1);
+		if (per_col < 1) {
+			per_col = 1;
+		}
+		int slot = idx + 1; /* slot 0 is the Settings tile itself */
+		*y = ICON_Y + (slot % per_col) * (ICON_H + 1);
+		*x = ICON_X + (slot / per_col) * (ICON_W + 1);
+	}
+	clamp_icon_pos(wm, ICON_H, ICON_W, y, x);
+}
+
+static void launcher_icons_free(WM *wm)
+{
+	for (int i = 0; i < wm->nlaunchers; i++) {
+		/* These are the only desktop icons that can be destroyed while the
+		 * program runs, so they are also the only ones a live drag can be
+		 * left holding a freed pointer to. */
+		if (wm->drag_icon == wm->launchers[i]->layer) {
+			wm->drag_icon = NULL;
+			wm->drag = DRAG_NONE;
+		}
+		comp_layer_destroy(wm->launchers[i]->layer);
+		free(wm->launchers[i]);
+	}
+	free(wm->launchers);
+	wm->launchers = NULL;
+	wm->nlaunchers = 0;
+}
+
+void launcher_icons_rebuild(WM *wm)
+{
+	launcher_icons_free(wm);
+
+	int n = wm->config.nlaunchers;
+	if (n <= 0) {
+		return;
+	}
+	wm->launchers = calloc((size_t)n, sizeof(*wm->launchers));
+	if (!wm->launchers) {
+		return;
+	}
+	for (int i = 0; i < n; i++) {
+		VpLauncherIcon *ic = calloc(1, sizeof(*ic));
+		if (!ic) {
+			return; /* the tiles we did build stay usable */
+		}
+		ic->wm = wm;
+		ic->idx = i;
+		int iy, ix;
+		launcher_icon_geom(wm, i, &iy, &ix);
+		vp_rect r = { iy, ix, ICON_H, ICON_W };
+		ic->layer = comp_layer_new(wm->comp, VP_BAND_DESKTOP, r,
+					   launcher_icon_paint, ic);
+		if (!ic->layer) {
+			free(ic);
+			return;
+		}
+		wm->launchers[wm->nlaunchers++] = ic;
+	}
+}
+
+void launcher_icons_reflow(WM *wm)
+{
+	for (int i = 0; i < wm->nlaunchers; i++) {
+		int iy, ix;
+		launcher_icon_geom(wm, wm->launchers[i]->idx, &iy, &ix);
+		comp_layer_move(wm->launchers[i]->layer, iy, ix);
+	}
+}
+
+void launcher_icons_redraw(WM *wm)
+{
+	for (int i = 0; i < wm->nlaunchers; i++) {
+		comp_layer_damage(wm->launchers[i]->layer);
+	}
+}
+
+vp_layer *launcher_icon_at(WM *wm, int y, int x)
+{
+	/* Front to back, so overlapping tiles resolve to the one on top. */
+	for (int i = wm->nlaunchers - 1; i >= 0; i--) {
+		if (layer_hit(wm->launchers[i]->layer, y, x)) {
+			return wm->launchers[i]->layer;
+		}
+	}
+	return NULL;
+}
+
+int launcher_icon_index(WM *wm, const vp_layer *l)
+{
+	for (int i = 0; i < wm->nlaunchers; i++) {
+		if (wm->launchers[i]->layer == l) {
+			return wm->launchers[i]->idx;
+		}
+	}
+	return -1;
+}
+
+void launcher_icon_activate(WM *wm, int idx)
+{
+	if (idx < 0 || idx >= wm->config.nlaunchers) {
+		return;
+	}
+	const VpLauncher *l = &wm->config.launchers[idx];
+	Window *win = wm_spawn_command(wm, l->cmd[0] ? l->cmd : NULL);
+	vp_log("launcher: '%s' -> %s%s\n", l->label, l->cmd,
+	       win ? "" : " (failed to open a window)");
+}
+
+void launcher_icons_teardown(WM *wm)
+{
+	launcher_icons_free(wm);
+}
+
 static void panel_paint(struct ncplane *p, bool full, void *user);
 
 void settings_open(WM *wm)
@@ -693,6 +868,11 @@ static void settings_set_view(WM *wm, settings_view v)
 		s->scroll = 0;
 		snprintf(s->status, sizeof(s->status),
 			 "←/→: change   Enter: edit   D: reset   S: save");
+	} else if (v == SETTINGS_VIEW_ICONS) {
+		s->sel = 0;
+		s->scroll = 0;
+		snprintf(s->status, sizeof(s->status),
+			 "A: add   Enter: command   R: rename   D: delete");
 	} else {
 		snprintf(s->status, sizeof(s->status),
 			 "↑/↓/←/→: select   Enter: open   Esc: close");
@@ -1046,29 +1226,35 @@ static void appearance_cycle_fit(WM *wm, int dir)
 	appearance_applied(wm, SETTING_BACKGROUND, msg);
 }
 
-/* Begin in-app text entry. kind 0 = image path, 1 = color hex (color_idx). */
-static void appearance_edit_start(WM *wm, int kind, int color_idx,
-				  const char *initial)
+/* Begin in-app text entry: seed the buffer and say what a commit will do. The
+ * caller owns which field `kind` refers to (see the EDIT_* values). */
+static void edit_start(WM *wm, int kind, const char *initial, const char *status)
 {
 	Settings *s = &wm->settings;
 	s->editing = true;
 	s->edit_kind = kind;
-	s->edit_color_idx = color_idx;
 	snprintf(s->input, sizeof(s->input), "%s", initial ? initial : "");
 	s->input_len = (int)strlen(s->input);
-	snprintf(
-		s->status, sizeof(s->status),
-		kind == 0 ?
-			"Type an image path · Enter: apply · Esc: cancel" :
-			"Type a hex color (RRGGBB) · Enter: apply · Esc: cancel");
+	snprintf(s->status, sizeof(s->status), "%s", status);
 	settings_damage(s);
+}
+
+/* Appearance text entry: the background image path, or a color override. */
+static void appearance_edit_start(WM *wm, int kind, int color_idx,
+				  const char *initial)
+{
+	wm->settings.edit_color_idx = color_idx;
+	edit_start(wm, kind, initial,
+		   kind == EDIT_BG_IMAGE ?
+			   "Type an image path · Enter: apply · Esc: cancel" :
+			   "Type a hex color (RRGGBB) · Enter: apply · Esc: cancel");
 }
 
 static void appearance_edit_commit(WM *wm)
 {
 	Settings *s = &wm->settings;
 	s->editing = false;
-	if (s->edit_kind == 0) {
+	if (s->edit_kind == EDIT_BG_IMAGE) {
 		free(wm->config.bg_image_path);
 		wm->config.bg_image_path = s->input[0] ? strdup(s->input) :
 							 NULL;
@@ -1158,7 +1344,8 @@ static void appearance_enter(WM *wm)
 {
 	int sel = wm->settings.sel;
 	if (sel == APP_ROW_IMAGE) {
-		appearance_edit_start(wm, 0, 0, wm->config.bg_image_path);
+		appearance_edit_start(wm, EDIT_BG_IMAGE, 0,
+				      wm->config.bg_image_path);
 	} else if (sel < APP_FIXED_ROWS) {
 		appearance_adjust(wm, +1);
 	} else {
@@ -1166,7 +1353,7 @@ static void appearance_enter(WM *wm)
 		char cur[8];
 		snprintf(cur, sizeof(cur), "%06x",
 			 vp_theme_field_get(&wm->theme, idx));
-		appearance_edit_start(wm, 1, idx, cur);
+		appearance_edit_start(wm, EDIT_COLOR, idx, cur);
 	}
 }
 
@@ -1257,6 +1444,205 @@ static void settings_appearance_key(WM *wm, const ncinput *ni)
 	}
 }
 
+/* ----- the Desktop Icons view -------------------------------------------- */
+
+/* Every in-app edit takes the launcher list over: drop the manual section's
+ * `launcher` lines (a hand-written one would otherwise resurrect a deleted icon
+ * on the next load), rebuild the desktop tiles, and repaint. */
+static void launchers_changed(WM *wm)
+{
+	config_manual_override(&wm->config, SETTING_LAUNCHERS);
+	launcher_icons_rebuild(wm);
+	settings_damage(&wm->settings);
+}
+
+/* Start editing launcher `idx`'s caption or command. idx == -1 means the label
+ * being typed is for an icon that does not exist yet. */
+static void icons_edit_start(WM *wm, int idx, int kind)
+{
+	Settings *s = &wm->settings;
+	const char *initial = "";
+	if (idx >= 0 && idx < wm->config.nlaunchers) {
+		initial = kind == EDIT_ICON_LABEL ? wm->config.launchers[idx].label :
+						    wm->config.launchers[idx].cmd;
+	}
+	s->edit_launcher = idx;
+	edit_start(wm, kind, initial,
+		   kind == EDIT_ICON_LABEL ?
+			   "Type a name for the icon · Enter: next · Esc: cancel" :
+			   "Type a command (empty = a shell) · Enter: apply · Esc: cancel");
+}
+
+static void icons_edit_commit(WM *wm)
+{
+	Settings *s = &wm->settings;
+	int idx = s->edit_launcher;
+	s->editing = false;
+
+	if (s->edit_kind == EDIT_ICON_LABEL) {
+		if (!s->input[0]) {
+			snprintf(s->status, sizeof(s->status),
+				 "An icon needs a name");
+			settings_damage(s);
+			return;
+		}
+		if (idx < 0) {
+			idx = config_launcher_add(&wm->config, s->input, "");
+			if (idx < 0) {
+				snprintf(s->status, sizeof(s->status),
+					 "Could not add the icon");
+				settings_damage(s);
+				return;
+			}
+			s->sel = idx;
+			launchers_changed(wm);
+			/* A new icon is nothing without its command, so ask for it
+			 * straight away. Escaping here leaves a shell launcher, which
+			 * is a perfectly good icon. */
+			icons_edit_start(wm, idx, EDIT_ICON_CMD);
+			return;
+		}
+		config_launcher_set(&wm->config, idx, s->input, NULL);
+		launchers_changed(wm);
+		snprintf(s->status, sizeof(s->status), "Renamed to %.40s",
+			 s->input);
+		return;
+	}
+
+	config_launcher_set(&wm->config, idx, NULL, s->input);
+	launchers_changed(wm);
+	if (s->input[0]) {
+		snprintf(s->status, sizeof(s->status), "Runs: %.40s", s->input);
+	} else {
+		snprintf(s->status, sizeof(s->status), "Opens a shell");
+	}
+}
+
+static void icons_remove(WM *wm, int row)
+{
+	Settings *s = &wm->settings;
+	if (row < 0 || row >= wm->config.nlaunchers) {
+		return; /* the add row: nothing to delete */
+	}
+	char label[64];
+	snprintf(label, sizeof(label), "%s", wm->config.launchers[row].label);
+	config_launcher_remove(&wm->config, row);
+	launchers_changed(wm);
+	clamp_scroll_n(wm, icons_total_rows(wm));
+	snprintf(s->status, sizeof(s->status), "Removed %.40s", label);
+}
+
+static void icons_edit_key(WM *wm, const ncinput *ni)
+{
+	Settings *s = &wm->settings;
+	if (ni->id == NCKEY_ESC) {
+		s->editing = false;
+		snprintf(s->status, sizeof(s->status), "Edit cancelled");
+		settings_damage(s);
+		return;
+	}
+	if (ni->id == NCKEY_ENTER) {
+		icons_edit_commit(wm);
+		settings_damage(s);
+		return;
+	}
+	if (ni->id == NCKEY_BACKSPACE) {
+		if (s->input_len > 0) {
+			s->input[--s->input_len] = '\0';
+			settings_damage(s);
+		}
+		return;
+	}
+	if (ni->id >= 0x20 && ni->id < 0x7f &&
+	    s->input_len < (int)sizeof(s->input) - 1) {
+		s->input[s->input_len++] = (char)ni->id;
+		s->input[s->input_len] = '\0';
+		settings_damage(s);
+	}
+}
+
+static void settings_icons_key(WM *wm, const ncinput *ni)
+{
+	Settings *s = &wm->settings;
+	if (s->editing) {
+		icons_edit_key(wm, ni);
+		return;
+	}
+	int n = icons_total_rows(wm);
+	switch (ni->id) {
+	case NCKEY_UP:
+		s->sel--;
+		clamp_scroll_n(wm, n);
+		settings_damage(s);
+		break;
+	case NCKEY_DOWN:
+		s->sel++;
+		clamp_scroll_n(wm, n);
+		settings_damage(s);
+		break;
+	case NCKEY_PGUP:
+		s->sel -= viewport_rows(wm);
+		clamp_scroll_n(wm, n);
+		settings_damage(s);
+		break;
+	case NCKEY_PGDOWN:
+		s->sel += viewport_rows(wm);
+		clamp_scroll_n(wm, n);
+		settings_damage(s);
+		break;
+	case NCKEY_HOME:
+		s->sel = 0;
+		clamp_scroll_n(wm, n);
+		settings_damage(s);
+		break;
+	case NCKEY_END:
+		s->sel = n - 1;
+		clamp_scroll_n(wm, n);
+		settings_damage(s);
+		break;
+	case NCKEY_ENTER:
+	case ' ':
+		if (is_add_row(wm, s->sel)) {
+			icons_edit_start(wm, -1, EDIT_ICON_LABEL);
+		} else {
+			icons_edit_start(wm, s->sel, EDIT_ICON_CMD);
+		}
+		break;
+	case 'a':
+	case 'A':
+		s->sel = wm->config.nlaunchers; /* the add row */
+		clamp_scroll_n(wm, n);
+		icons_edit_start(wm, -1, EDIT_ICON_LABEL);
+		break;
+	case 'r':
+	case 'R':
+		if (!is_add_row(wm, s->sel)) {
+			icons_edit_start(wm, s->sel, EDIT_ICON_LABEL);
+		}
+		break;
+	case 'd':
+	case 'D':
+	case NCKEY_DEL:
+		icons_remove(wm, s->sel);
+		break;
+	case 's':
+	case 'S':
+		snprintf(s->status, sizeof(s->status),
+			 config_save(&wm->config) ?
+				 "Saved" :
+				 "Save failed (see VP_DEBUG)");
+		settings_damage(s);
+		break;
+	case NCKEY_ESC:
+	case 'q':
+	case 'Q':
+		settings_back(wm);
+		break;
+	default:
+		break;
+	}
+}
+
 void settings_handle_key(WM *wm, const ncinput *ni)
 {
 	Settings *s = &wm->settings;
@@ -1274,6 +1660,10 @@ void settings_handle_key(WM *wm, const ncinput *ni)
 	}
 	if (s->view == SETTINGS_VIEW_APPEARANCE) {
 		settings_appearance_key(wm, ni);
+		return;
+	}
+	if (s->view == SETTINGS_VIEW_ICONS) {
+		settings_icons_key(wm, ni);
 		return;
 	}
 
@@ -1434,6 +1824,26 @@ void settings_click(WM *wm, int btn, int y, int x)
 		return;
 	}
 
+	if (s->view == SETTINGS_VIEW_ICONS) {
+		if (s->editing) {
+			return; /* ignore clicks while typing */
+		}
+		int listrow = rely - 1; /* row 0 is the top border */
+		if (listrow >= 0 && listrow < viewport_rows(wm)) {
+			int row = s->scroll + listrow;
+			if (row >= 0 && row < icons_total_rows(wm)) {
+				s->sel = row;
+				settings_damage(s);
+				/* The last row is a button, not a setting: clicking
+				 * it starts a new icon rather than just selecting. */
+				if (is_add_row(wm, row)) {
+					icons_edit_start(wm, -1, EDIT_ICON_LABEL);
+				}
+			}
+		}
+		return;
+	}
+
 	int listrow = rely - 1; /* row 0 is the top border */
 	if (listrow >= 0 && listrow < viewport_rows(wm)) {
 		int row = s->scroll + listrow;
@@ -1508,6 +1918,15 @@ void settings_scroll(WM *wm, int dir)
 	if (s->view == SETTINGS_VIEW_TERMINAL) {
 		term_adjust(wm, s->sel,
 			    dir < 0 ? +1 : -1); /* wheel up raises the value */
+		return;
+	}
+	if (s->view == SETTINGS_VIEW_ICONS) {
+		if (s->editing) {
+			return;
+		}
+		s->sel += dir;
+		clamp_scroll_n(wm, icons_total_rows(wm));
+		settings_damage(s);
 		return;
 	}
 	if (s->view == SETTINGS_VIEW_APPEARANCE) {
@@ -1858,8 +2277,8 @@ static void draw_appearance(WM *wm, struct ncplane *p, int W, int H)
 		/* Show the live edit buffer (with a cursor) on the row being typed. */
 		bool editing_this =
 			s->editing &&
-			((s->edit_kind == 0 && row == APP_ROW_IMAGE) ||
-			 (s->edit_kind == 1 &&
+			((s->edit_kind == EDIT_BG_IMAGE && row == APP_ROW_IMAGE) ||
+			 (s->edit_kind == EDIT_COLOR &&
 			  row == APP_FIXED_ROWS + s->edit_color_idx));
 		if (editing_this) {
 			/* Show the live edit buffer with a cursor. capturing=false so
@@ -1886,6 +2305,107 @@ static void draw_appearance(WM *wm, struct ncplane *p, int W, int H)
 	char hbuf[160];
 	snprintf(hbuf, sizeof(hbuf), "%-*.*s", W - 4, W - 4,
 		 "↑/↓ select · ←/→ change · Enter edit · D reset · S save · Esc back");
+	ncplane_putstr_yx(p, H - 2, 2, hbuf);
+}
+
+/* ----- the Desktop Icons view -------------------------------------------- */
+
+/* Fit a value into the row's value column. Commands are easily wider than the
+ * panel, and draw_row right-aligns them, so an unbounded one would paint over
+ * the frame (and the scrollbar). `tail` keeps the end rather than the start:
+ * that is the part you are looking at while typing. */
+static void fit_value(const char *text, bool tail, int max, char *buf, size_t n)
+{
+	int len = (int)strlen(text);
+	if (max < 4) {
+		max = 4;
+	}
+	if (len <= max) {
+		snprintf(buf, n, "%s", text);
+		return;
+	}
+	if (tail) {
+		int start = len - max;
+		while (start < len &&
+		       ((unsigned char)text[start] & 0xc0) == 0x80) {
+			start++; /* don't start mid-codepoint */
+		}
+		snprintf(buf, n, "%s", text + start);
+		return;
+	}
+	int keep = max - 1; /* one cell for the ellipsis */
+	while (keep > 0 && ((unsigned char)text[keep] & 0xc0) == 0x80) {
+		keep--;
+	}
+	snprintf(buf, n, "%.*s…", keep, text);
+}
+
+static void draw_icons(WM *wm, struct ncplane *p, int W, int H)
+{
+	Settings *s = &wm->settings;
+	int v = viewport_rows(wm);
+	int n = icons_total_rows(wm);
+	int roww = W - (n > v ? 1 : 0);
+
+	clamp_scroll_n(wm, n);
+	ncplane_erase(p);
+	draw_border(wm, p, W, H, " Desktop Icons ");
+
+	/* Leave the caption column room to stay readable next to a long command;
+	 * a prompt's own label ("Command") is shorter and needs less. */
+	int valmax = roww - 4 - 12;
+	int promptmax = roww - 4 - 9;
+
+	for (int i = 0; i < v; i++) {
+		int row = s->scroll + i;
+		if (row >= n) {
+			break;
+		}
+
+		/* While typing, the row being edited turns into a prompt: the field's
+		 * name on the left, the live buffer (with a cursor) on the right. A
+		 * new icon has no row of its own yet, so its name is typed on the add
+		 * row instead. */
+		bool editing_this =
+			s->editing && (row == s->edit_launcher ||
+				       (s->edit_launcher < 0 && is_add_row(wm, row)));
+		if (editing_this) {
+			char typed[sizeof(s->input) + 2];
+			snprintf(typed, sizeof(typed), "%s_", s->input);
+			char buf[sizeof(typed)];
+			fit_value(typed, true, promptmax, buf, sizeof(buf));
+			draw_row(wm, p, 1 + i, roww,
+				 s->edit_kind == EDIT_ICON_LABEL ? "Name" :
+								   "Command",
+				 buf, true, false);
+			continue;
+		}
+		if (is_add_row(wm, row)) {
+			draw_row(wm, p, 1 + i, roww, "+ Add an icon", "",
+				 row == s->sel, false);
+			continue;
+		}
+
+		const VpLauncher *l = &wm->config.launchers[row];
+		char val[192];
+		fit_value(l->cmd[0] ? l->cmd : "(shell)", false, valmax, val,
+			  sizeof(val));
+		draw_row(wm, p, 1 + i, roww, l->label, val, row == s->sel,
+			 false);
+	}
+	draw_scrollbar(wm, p, W, v, n, s->scroll);
+
+	/* Status + hint lines (mirrors the other editors' footer). */
+	vp_setbg(p, wm->theme.panel_bg);
+	vp_setfg(p, wm->theme.panel_status);
+	char sbuf[160];
+	snprintf(sbuf, sizeof(sbuf), "%-*.*s", W - 4, W - 4, s->status);
+	ncplane_putstr_yx(p, H - 3, 2, sbuf);
+
+	vp_setfg(p, wm->theme.panel_hint);
+	char hbuf[160];
+	snprintf(hbuf, sizeof(hbuf), "%-*.*s", W - 4, W - 4,
+		 "A add · Enter command · R rename · D delete · S save · Esc back");
 	ncplane_putstr_yx(p, H - 2, 2, hbuf);
 }
 
@@ -1917,6 +2437,8 @@ static void panel_paint(struct ncplane *p, bool full, void *user)
 		draw_terminal(wm, p, W, H);
 	} else if (s->view == SETTINGS_VIEW_APPEARANCE) {
 		draw_appearance(wm, p, W, H);
+	} else if (s->view == SETTINGS_VIEW_ICONS) {
+		draw_icons(wm, p, W, H);
 	} else {
 		draw_keybindings(wm, p, W, H);
 	}

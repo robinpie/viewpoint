@@ -215,6 +215,16 @@ typedef struct {
 	vp_action act;
 } keychord;
 
+/* A user-defined desktop launcher icon: the caption on its tile and the command
+ * a click runs. An empty command means a plain shell, exactly what the "new
+ * window" chord opens. Position is the tile's top-left cell, or -1 for
+ * "unplaced" - auto-stacked under the Settings tile until the user drags it. */
+typedef struct VpLauncher {
+	char *label; /* never NULL */
+	char *cmd; /* never NULL; "" = plain shell */
+	int y, x;
+} VpLauncher;
+
 /* Parsed user configuration, read from $XDG_CONFIG_HOME/viewpoint/viewpoint.conf
  * (see config.c). Currently this is just the customizable keymap: it starts as
  * a copy of the built-in defaults, which `bind`/`unbind` lines then edit. */
@@ -237,6 +247,11 @@ typedef struct VpConfig {
 	int settings_icon_y, settings_icon_x;
 	int exit_icon_y, exit_icon_x;
 	int die_icon_y, die_icon_x;
+
+	/* User-defined desktop launcher icons, in the order they are drawn and
+	 * listed (see VpLauncher). Edited from Settings → Desktop Icons. */
+	VpLauncher *launchers;
+	int nlaunchers, launcher_cap;
 
 	/* Theming: chosen preset (NULL = default), background overrides (-1/NULL
 	 * = inherit from preset), and per-color overrides (VpColorOverride). */
@@ -276,6 +291,7 @@ typedef enum {
 	SETTING_BACKGROUND,
 	SETTING_COLORS,
 	SETTING_KEEP_CUSTOM,
+	SETTING_LAUNCHERS,
 } vp_setting;
 
 /* ------------------------------------------------------------------------- */
@@ -402,6 +418,7 @@ typedef enum {
 	SETTINGS_VIEW_KEYBINDINGS,
 	SETTINGS_VIEW_TERMINAL, /* scrollback size / scroll step */
 	SETTINGS_VIEW_APPEARANCE, /* theme, desktop background, color overrides */
+	SETTINGS_VIEW_ICONS, /* custom desktop launcher icons */
 } settings_view;
 
 /* In-app settings. A modal panel opened from a desktop launcher icon; while open
@@ -418,14 +435,16 @@ typedef struct Settings {
 	vp_layer *panel; /* the modal panel (VP_BAND_MODAL; created on open) */
 	char status[128]; /* transient status/hint line */
 
-	/* In-app text entry (Appearance view): while `editing`, keystrokes build up
-	 * `input`. edit_kind selects what a commit sets - the background image path
-	 * or a color override (edit_color_idx names the VpTheme field). */
+	/* In-app text entry (Appearance and Desktop Icons views): while `editing`,
+	 * keystrokes build up `input`. edit_kind selects what a commit sets - see
+	 * the EDIT_* values in settings.c - and the matching index field names
+	 * which color / which launcher it applies to. */
 	bool editing;
 	char input[256];
 	int input_len;
-	int edit_kind; /* 0 = image path, 1 = color hex */
-	int edit_color_idx; /* VpTheme color-field index when edit_kind == 1 */
+	int edit_kind;
+	int edit_color_idx; /* VpTheme color-field index for a color edit */
+	int edit_launcher; /* launcher index for a label/command edit, -1 = new */
 
 	/* Scrollbar drag: set while the left button is held on the thumb. The
 	 * drag is anchored rather than absolute - it moves the list by whole
@@ -436,6 +455,15 @@ typedef struct Settings {
 	int sb_cell0; /* track row the drag was anchored at */
 	int sb_scroll0; /* scroll when it was anchored */
 } Settings;
+
+/* One live launcher tile. Heap-allocated per icon so its address is stable: it
+ * is the paint callback's user pointer, while the config list it indexes is a
+ * growable array whose entries move on realloc. */
+typedef struct VpLauncherIcon {
+	struct WM *wm;
+	int idx; /* index into config.launchers */
+	vp_layer *layer;
+} VpLauncherIcon;
 
 typedef struct WM {
 	struct notcurses *nc;
@@ -459,6 +487,11 @@ typedef struct WM {
 	 * Die also terminates the session daemon. */
 	vp_layer *exit_icon;
 	vp_layer *die_icon;
+
+	/* The user's own launcher tiles, one per config.launchers entry and in the
+	 * same order (see launcher_icons_rebuild). */
+	VpLauncherIcon **launchers;
+	int nlaunchers;
 
 	/* Bare console (we own GPM + draw a software pointer) vs. GUI terminal
 	 * (notcurses decodes the mouse, the emulator draws the cursor). Mutually
@@ -552,6 +585,14 @@ bool config_manual_shadows_action(const VpConfig *live, vp_action act,
 void config_manual_override(VpConfig *cfg, vp_setting setting);
 void config_manual_override_color(VpConfig *cfg, int field_idx);
 
+/* Launcher list maintenance (used by the Desktop Icons editor). Strings are
+ * copied; a NULL label/cmd in _set leaves that field alone. _add returns the new
+ * icon's index, or -1 on OOM. */
+int config_launcher_add(VpConfig *cfg, const char *label, const char *cmd);
+bool config_launcher_set(VpConfig *cfg, int idx, const char *label,
+			 const char *cmd);
+void config_launcher_remove(VpConfig *cfg, int idx);
+
 /* Per-color override list maintenance (used by the Appearance editor). The
  * field index is a vp_theme_field_* index. */
 bool config_set_color_override(VpConfig *cfg, int idx, vp_rgb color);
@@ -567,6 +608,10 @@ bool config_has_color_override(const VpConfig *cfg, int idx, vp_rgb *out);
  * on failure. */
 pid_t pty_spawn(int rows, int cols, int *master_out);
 
+/* As pty_spawn, but running `cmd` under the shell ("$SHELL -c cmd") instead of
+ * an interactive shell. A NULL or empty cmd is exactly pty_spawn. */
+pid_t pty_spawn_cmd(int rows, int cols, int *master_out, const char *cmd);
+
 /* Push a new window size to the kernel so the child receives SIGWINCH. */
 void pty_set_winsize(int master, int rows, int cols);
 
@@ -577,6 +622,9 @@ void pty_set_winsize(int master, int rows, int cols);
 bool session_connect(WM *wm);
 int session_fd(WM *wm);
 bool session_request_new(WM *wm, int rows, int cols);
+/* Ask the daemon for a window running `cmd` under the shell; NULL/"" is a plain
+ * interactive shell (what session_request_new asks for). */
+bool session_request_new_cmd(WM *wm, int rows, int cols, const char *cmd);
 bool session_send_input(Window *w, const char *bytes, size_t len);
 bool session_resize(Window *w, int rows, int cols);
 bool session_close(Window *w);
@@ -685,6 +733,8 @@ void wm_focus_index(WM *wm, int idx);
 void wm_focus_window(WM *wm, Window *win);
 void wm_focus_next(WM *wm, int dir);
 Window *wm_spawn_window(WM *wm);
+/* Open a window running `cmd` under the shell (NULL = a plain shell). */
+Window *wm_spawn_command(WM *wm, const char *cmd);
 void wm_close_focused(WM *wm);
 void wm_minimize(WM *wm, Window *win);
 void wm_restore(WM *wm, Window *win);
@@ -800,6 +850,23 @@ bool exit_icon_hit(WM *wm, int y, int x);
 bool die_icon_hit(WM *wm, int y, int x);
 /* Destroy the icon plane on shutdown. */
 void exit_icon_teardown(WM *wm);
+
+/* The user's own desktop launcher icons (Settings → Desktop Icons). The tiles
+ * are rebuilt wholesale from config.launchers whenever the list changes, so a
+ * layer can never point at an entry that has moved or gone away. */
+void launcher_icons_rebuild(WM *wm);
+/* Re-clamp every launcher tile onto the screen after a resize. */
+void launcher_icons_reflow(WM *wm);
+/* Repaint them all in the current theme. */
+void launcher_icons_redraw(WM *wm);
+/* The topmost launcher tile covering absolute cell (y,x), or NULL. */
+vp_layer *launcher_icon_at(WM *wm, int y, int x);
+/* Which launcher a tile layer belongs to, or -1 if it isn't one. */
+int launcher_icon_index(WM *wm, const vp_layer *l);
+/* Run launcher `idx`'s command in a new window. */
+void launcher_icon_activate(WM *wm, int idx);
+/* Destroy every launcher tile on shutdown. */
+void launcher_icons_teardown(WM *wm);
 
 void input_route_mouse(WM *wm, const ncinput *ni);
 

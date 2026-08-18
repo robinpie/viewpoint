@@ -98,6 +98,13 @@ The `Appearance` tile changes the look:
 - By default, switching the theme resets your per-color and background tweaks so the new preset applies fully; flip `Keep tweaks on theme switch` to `yes` to carry them across theme changes instead
 - `S` to save now, `Esc` (or click outside the panel) to return to the grid
 
+The `Desktop Icons` tile manages your own desktop icons:
+
+- `A` (or `Enter` on the `+ Add an icon` row) to add one: type its name, `Enter`, then type the command it runs. Leave the command empty for your default shell.
+- `Enter` on a row to change what it runs, `R` to rename it, `D` to delete it
+- The command runs under your `$SHELL` (`$SHELL -c <command>`), so pipes, redirections and shell functions work. The window closes when the command exits
+- `S` to save now, `Esc` (or click outside the panel) to return to the grid
+
 The `Terminal` tile adjusts per-window scrollback behavior:
 
 - `↑`/`↓` (or click a row) to select a setting
@@ -159,6 +166,14 @@ keep_customizations = false
 # (names: settings, exit. Normally written automatically when you drag an icon.)
 icon = settings 1 1
 icon = exit 60 20
+
+# Your own launcher icons:  launcher = <x> <y> <label> | <command>
+# -1 -1 means "not placed yet": it is auto-stacked under the Settings tile until
+# you drag it. An empty command opens a plain shell. The label ends at the first
+# '|', so the command may contain pipes. Editing the list in-app takes it over:
+# these lines are then rewritten in the in-app section and dropped from here.
+launcher = -1 -1 Scratch shell |
+launcher = 2 12 Logs | journalctl -f | less
 ```
 
 A chord is an optional `alt+`/`shift+`/`ctrl+` modifier prefix followed by a key: a single character (`n`, `x`), a function key (`f1`…`f60`), or a named key (`tab`, `enter`, `esc`, `space`, `left`/`right`/`up`/`down`, `home`, `end`, `pgup`, `pgdn`, `delete`, `insert`, `backspace`).

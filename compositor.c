@@ -102,6 +102,11 @@ struct vp_comp {
 	uint32_t rev;
 	uint32_t stack_rev; /* rev the plane stack was last reconciled at */
 	uint32_t gfx_rev; /* rev the graphics were last reconciled at */
+	/* rev the screen was last presented at. The screen is a reconcile target
+	 * like the others: a layer that only moved repaints nothing and restacks
+	 * nothing, so without this a drag would sit on screen at its old position
+	 * until some unrelated damage forced a present. */
+	uint32_t present_rev;
 	/* Bumped only when a reconcile actually *changed* the plane order.
 	 * Moving a window changes the scene every frame of a drag but almost
 	 * never changes who is in front of whom, and only the latter forces a
@@ -1070,6 +1075,12 @@ bool comp_frame(vp_comp *c)
 		drew = true;
 	}
 
+	/* Checked after the passes, since a painter may itself move or resize a
+	 * layer (the settings panel re-derives its own geometry as it paints). */
+	if (c->rev != c->present_rev) {
+		drew = true;
+	}
+
 	if (!drew) {
 		return false; /* nothing changed: an idle frame is free */
 	}
@@ -1084,5 +1095,6 @@ bool comp_frame(vp_comp *c)
 	c->applied_x = c->cursor_x;
 
 	notcurses_render(c->nc);
+	c->present_rev = c->rev;
 	return true;
 }

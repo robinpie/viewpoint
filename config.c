@@ -24,6 +24,7 @@
  *     unbind = alt+f4             # drop a default chord
  *     toggle = f12                # the INTERPRET/PASSTHROUGH key
  *     scrollback  = 2000          # per-window history lines
+ *     launcher = -1 -1 Logs | journalctl -f   # a desktop icon (-1 -1 = unplaced)
  *
  * Recognized keys are dispatched in config_apply(). Chord/action name parsing
  * lives in input.c, next to the keymap it builds.
@@ -149,6 +150,90 @@ bool config_has_color_override(const VpConfig *cfg, int idx, vp_rgb *out)
 	return false;
 }
 
+/* ----- custom desktop launcher icons ------------------------------------- */
+
+/* label and cmd are never NULL once stored, so every reader can just use them. */
+static char *dup_or_empty(const char *s)
+{
+	return strdup(s ? s : "");
+}
+
+int config_launcher_add(VpConfig *cfg, const char *label, const char *cmd)
+{
+	if (cfg->nlaunchers == cfg->launcher_cap) {
+		int nc = cfg->launcher_cap ? cfg->launcher_cap * 2 : 4;
+		VpLauncher *n =
+			realloc(cfg->launchers, (size_t)nc * sizeof(*n));
+		if (!n) {
+			return -1;
+		}
+		cfg->launchers = n;
+		cfg->launcher_cap = nc;
+	}
+	VpLauncher *l = &cfg->launchers[cfg->nlaunchers];
+	l->label = dup_or_empty(label);
+	l->cmd = dup_or_empty(cmd);
+	if (!l->label || !l->cmd) {
+		free(l->label);
+		free(l->cmd);
+		return -1;
+	}
+	l->y = l->x = -1; /* unplaced: auto-stacked until dragged */
+	return cfg->nlaunchers++;
+}
+
+bool config_launcher_set(VpConfig *cfg, int idx, const char *label,
+			 const char *cmd)
+{
+	if (idx < 0 || idx >= cfg->nlaunchers) {
+		return false;
+	}
+	VpLauncher *l = &cfg->launchers[idx];
+	if (label) {
+		char *n = strdup(label);
+		if (!n) {
+			return false;
+		}
+		free(l->label);
+		l->label = n;
+	}
+	if (cmd) {
+		char *n = strdup(cmd);
+		if (!n) {
+			return false;
+		}
+		free(l->cmd);
+		l->cmd = n;
+	}
+	return true;
+}
+
+void config_launcher_remove(VpConfig *cfg, int idx)
+{
+	if (idx < 0 || idx >= cfg->nlaunchers) {
+		return;
+	}
+	free(cfg->launchers[idx].label);
+	free(cfg->launchers[idx].cmd);
+	/* Shift rather than swap: the list order is what the user sees, both in the
+	 * editor and in the tiles' default placement. */
+	for (int i = idx; i < cfg->nlaunchers - 1; i++) {
+		cfg->launchers[i] = cfg->launchers[i + 1];
+	}
+	cfg->nlaunchers--;
+}
+
+static void launchers_free(VpConfig *cfg)
+{
+	for (int i = 0; i < cfg->nlaunchers; i++) {
+		free(cfg->launchers[i].label);
+		free(cfg->launchers[i].cmd);
+	}
+	free(cfg->launchers);
+	cfg->launchers = NULL;
+	cfg->nlaunchers = cfg->launcher_cap = 0;
+}
+
 /* Apply one parsed key/value pair to cfg. Returns false for unknown keys or
  * malformed values. line is supplied only for diagnostics. */
 static bool config_apply(VpConfig *cfg, const char *key, char *val, int line)
@@ -222,6 +307,45 @@ static bool config_apply(VpConfig *cfg, const char *key, char *val, int line)
 			       name);
 			return false;
 		}
+		return true;
+	}
+	if (strcmp(key, "launcher") == 0) {
+		/* "<x> <y> <label> | <command>" - a custom desktop icon. -1 -1 means
+		 * "not placed yet" (auto-stacked under the Settings tile). The label
+		 * ends at the first '|', so the command may itself contain pipes. */
+		char *end = NULL;
+		long x = strtol(val, &end, 10);
+		if (end == val) {
+			vp_log("config: line %d: launcher needs '<x> <y> <label> | <command>'\n",
+			       line);
+			return false;
+		}
+		char *p = end;
+		long y = strtol(p, &end, 10);
+		if (end == p) {
+			vp_log("config: line %d: launcher needs '<x> <y> <label> | <command>'\n",
+			       line);
+			return false;
+		}
+		char *rest = end;
+		char *cmd = NULL;
+		char *bar = strchr(rest, '|');
+		if (bar) {
+			*bar = '\0';
+			cmd = trim(bar + 1);
+		}
+		char *label = trim(rest);
+		if (!*label) {
+			vp_log("config: line %d: launcher needs a label\n",
+			       line);
+			return false;
+		}
+		int idx = config_launcher_add(cfg, label, cmd);
+		if (idx < 0) {
+			return false;
+		}
+		cfg->launchers[idx].x = (int)x;
+		cfg->launchers[idx].y = (int)y;
 		return true;
 	}
 	if (strcmp(key, "theme") == 0) {
@@ -406,10 +530,13 @@ void config_defaults(VpConfig *cfg)
 	cfg->keep_customizations = false;
 	cfg->color_overrides = NULL;
 	cfg->n_color_overrides = cfg->color_cap = 0;
+	cfg->launchers = NULL;
+	cfg->nlaunchers = cfg->launcher_cap = 0;
 }
 
 void config_free(VpConfig *cfg)
 {
+	launchers_free(cfg);
 	free(cfg->keymap);
 	cfg->keymap = NULL;
 	cfg->nkeys = 0;
@@ -496,6 +623,28 @@ static void write_inapp_diff(FILE *f, const VpConfig *cfg, const VpConfig *base)
 				     cfg->die_icon_x != base->die_icon_x)) {
 		fprintf(f, "icon = die %d %d\n", cfg->die_icon_x,
 			cfg->die_icon_y);
+	}
+
+	/* Custom launcher icons. Touching the list in-app (adding, editing, deleting
+	 * or dragging one) drops the manual section's launcher lines first - see
+	 * config_manual_override - so writing every entry that isn't already in the
+	 * baseline can't duplicate an icon the manual section also defines. */
+	for (int i = 0; i < cfg->nlaunchers; i++) {
+		const VpLauncher *l = &cfg->launchers[i];
+		bool in_base = false;
+		for (int j = 0; j < base->nlaunchers; j++) {
+			const VpLauncher *b = &base->launchers[j];
+			if (strcmp(l->label, b->label) == 0 &&
+			    strcmp(l->cmd, b->cmd) == 0 && l->y == b->y &&
+			    l->x == b->x) {
+				in_base = true;
+				break;
+			}
+		}
+		if (!in_base) {
+			fprintf(f, "launcher = %d %d %s | %s\n", l->x, l->y,
+				l->label, l->cmd);
+		}
 	}
 
 	if (cfg->keep_customizations != base->keep_customizations) {
@@ -638,6 +787,22 @@ static bool setting_differs(const VpConfig *a, const VpConfig *b, vp_setting s)
 	}
 	case SETTING_KEEP_CUSTOM:
 		return a->keep_customizations != b->keep_customizations;
+	case SETTING_LAUNCHERS: {
+		if (a->nlaunchers != b->nlaunchers) {
+			return true;
+		}
+		/* Order matters here: it is the order the icons are listed and placed
+		 * in, so a reshuffle is a real difference. */
+		for (int i = 0; i < a->nlaunchers; i++) {
+			if (strcmp(a->launchers[i].label, b->launchers[i].label) != 0 ||
+			    strcmp(a->launchers[i].cmd, b->launchers[i].cmd) != 0 ||
+			    a->launchers[i].y != b->launchers[i].y ||
+			    a->launchers[i].x != b->launchers[i].x) {
+				return true;
+			}
+		}
+		return false;
+	}
 	case SETTING_COLORS: {
 		if (a->n_color_overrides != b->n_color_overrides) {
 			return true;
@@ -747,6 +912,12 @@ void config_manual_override(VpConfig *cfg, vp_setting setting)
 		break;
 	case SETTING_KEEP_CUSTOM:
 		manual_drop_key(cfg, "keep_customizations", NULL);
+		break;
+	case SETTING_LAUNCHERS:
+		/* The launcher list is edited as a whole, so an in-app change takes the
+		 * whole thing over: any hand-written `launcher` line would otherwise be
+		 * re-added on the next load, resurrecting a deleted icon. */
+		manual_drop_key(cfg, "launcher", NULL);
 		break;
 	case SETTING_TOGGLE_KEY:
 	case SETTING_SCROLLBACK:

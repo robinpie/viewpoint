@@ -158,6 +158,8 @@ int main(int argc, char **argv)
 		&wm); /* desktop launcher icon (top-left), below the windows */
 	exit_icon_init(
 		&wm); /* desktop Exit icon (bottom-right), below the windows */
+	launcher_icons_rebuild(
+		&wm); /* the user's own desktop icons, from the config */
 
 	session_drain(&wm);
 	if (wm.nwins == 0) {
@@ -284,6 +286,7 @@ int main(int argc, char **argv)
 	free(pfds);
 	session_close_client(&wm);
 	exit_icon_teardown(&wm);
+	launcher_icons_teardown(&wm);
 	settings_teardown(&wm);
 	background_free(&wm);
 	comp_destroy(wm.comp); /* whatever is left: the pointer, stray layers */

@@ -26,9 +26,15 @@
 #include <limits.h>
 #include <time.h>
 
-#define VP_SESSION_MAGIC "VPS2"
+/* Wire protocol id. Bumped whenever a message's layout changes, so a daemon left
+ * running from an older build refuses the connection outright instead of
+ * misparsing it (see evict_stale_server for what happens next). VPS2 is the
+ * previous one: same messages, but MSG_NEW carried no command. */
+#define VP_SESSION_MAGIC "VPS3"
+#define VP_SESSION_LEGACY "VPS2"
 #define VP_SESSION_ACK "OK"
 #define VP_REPLAY_CAP (1024 * 1024)
+#define VP_CMD_MAX 4096 /* longest launcher command the protocol carries */
 
 enum {
 	MSG_WINDOW = 'W',
@@ -158,13 +164,26 @@ static bool send_title_msg(int fd, int id, const char *title)
 
 bool session_request_new(WM *wm, int rows, int cols)
 {
+	return session_request_new_cmd(wm, rows, cols, NULL);
+}
+
+bool session_request_new_cmd(WM *wm, int rows, int cols, const char *cmd)
+{
 	if (wm->session_fd < 0) {
 		return false;
 	}
-	unsigned char h[5] = { MSG_NEW };
+	size_t len = cmd ? strlen(cmd) : 0;
+	if (len > VP_CMD_MAX) {
+		len = VP_CMD_MAX;
+	}
+	unsigned char h[7] = { MSG_NEW };
 	put16(h + 1, rows);
 	put16(h + 3, cols);
+	put16(h + 5, (int)len);
 	if (!write_all(wm->session_fd, h, sizeof(h))) {
+		return false;
+	}
+	if (len > 0 && !write_all(wm->session_fd, cmd, len)) {
 		return false;
 	}
 	struct pollfd pfd = { .fd = wm->session_fd, .events = POLLIN };
@@ -371,6 +390,60 @@ static bool start_server(void)
 	return true;
 }
 
+/* Connect to the daemon's socket. Returns the fd, or -1 if nothing is listening. */
+static int session_dial(const char *path)
+{
+	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0) {
+		return -1;
+	}
+	struct sockaddr_un sa = { .sun_family = AF_UNIX };
+	snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", path);
+	if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+/* Announce the protocol we speak and wait for the daemon's ack. A daemon built
+ * against a different wire version closes the connection here rather than
+ * misreading our messages. */
+static bool session_hello(int fd, const char *magic)
+{
+	char ack[2];
+	return write_all(fd, magic, 4) && read_all(fd, ack, sizeof(ack)) &&
+	       memcmp(ack, VP_SESSION_ACK, sizeof(ack)) == 0;
+}
+
+/* A daemon from an older build is holding the socket and can't talk to us. Ask
+ * it to shut down in the protocol it does speak - so it closes its windows
+ * properly instead of being orphaned - and wait for it to let the socket go.
+ * MSG_SHUTDOWN has meant the same single byte in every version so far. */
+static void evict_stale_server(const char *path)
+{
+	int fd = session_dial(path);
+	if (fd >= 0) {
+		if (session_hello(fd, VP_SESSION_LEGACY)) {
+			unsigned char q = MSG_SHUTDOWN;
+			write_all(fd, &q, 1);
+		}
+		close(fd);
+	}
+	vp_log("session: daemon speaks an older protocol; retiring it\n");
+
+	/* Wait for it to exit before starting ours: it unlinks the socket path on
+	 * the way out, which would otherwise delete our new daemon's socket. */
+	for (int i = 0; i < 40; i++) {
+		usleep(50000);
+		int probe = session_dial(path);
+		if (probe < 0) {
+			return;
+		}
+		close(probe);
+	}
+}
+
 bool session_connect(WM *wm)
 {
 	wm->session_fd = -1;
@@ -379,28 +452,29 @@ bool session_connect(WM *wm)
 		return false;
 	}
 
+	bool evicted = false;
 	for (int attempt = 0; attempt < 30; attempt++) {
-		int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-		if (fd < 0) {
-			return false;
-		}
-		struct sockaddr_un sa = { .sun_family = AF_UNIX };
-		snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", path);
-		if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0) {
-			if (!write_all(fd, VP_SESSION_MAGIC, 4)) {
-				close(fd);
+		int fd = session_dial(path);
+		if (fd >= 0) {
+			if (session_hello(fd, VP_SESSION_MAGIC)) {
+				wm->session_fd = fd;
+				return true;
+			}
+			close(fd);
+			/* Refused: retire the old daemon and put ours in its place.
+			 * Only once - a second refusal is a real failure, not skew. */
+			if (evicted) {
 				return false;
 			}
-			char ack[2];
-			if (!read_all(fd, ack, sizeof(ack)) ||
-			    memcmp(ack, VP_SESSION_ACK, sizeof(ack)) != 0) {
-				close(fd);
+			evicted = true;
+			evict_stale_server(path);
+			unlink(path);
+			if (!start_server()) {
 				return false;
 			}
-			wm->session_fd = fd;
-			return true;
+			usleep(50000);
+			continue;
 		}
-		close(fd);
 		if (attempt == 0) {
 			unlink(path);
 			if (!start_server()) {
@@ -625,7 +699,7 @@ static bool server_add(SessWin *w)
 	return true;
 }
 
-static SessWin *server_new_window(int rows, int cols)
+static SessWin *server_new_window(int rows, int cols, const char *cmd)
 {
 	if (rows < 1) {
 		rows = 24;
@@ -641,8 +715,13 @@ static SessWin *server_new_window(int rows, int cols)
 	w->rows = rows;
 	w->cols = cols;
 	w->pty = -1;
-	snprintf(w->title, sizeof(w->title), "shell %d", w->id);
-	w->child = pty_spawn(rows, cols, &w->pty);
+	if (cmd && *cmd) {
+		snprintf(w->title, sizeof(w->title), "%.*s",
+			 (int)sizeof(w->title) - 1, cmd);
+	} else {
+		snprintf(w->title, sizeof(w->title), "shell %d", w->id);
+	}
+	w->child = pty_spawn_cmd(rows, cols, &w->pty, cmd);
 	if (w->child < 0 || !server_add(w)) {
 		if (w->pty >= 0) {
 			close(w->pty);
@@ -709,12 +788,23 @@ static bool server_client_msg(bool *shutdown)
 		return false;
 	}
 	if (type == MSG_NEW) {
-		unsigned char h[4];
+		unsigned char h[6];
 		if (!read_all(g_client, h, sizeof(h))) {
 			server_drop_client();
 			return false;
 		}
-		server_new_window(get16(h), get16(h + 2));
+		int len = get16(h + 4);
+		if (len > VP_CMD_MAX) {
+			server_drop_client(); /* not a message we can resync from */
+			return false;
+		}
+		char cmd[VP_CMD_MAX + 1];
+		if (len > 0 && !read_all(g_client, cmd, (size_t)len)) {
+			server_drop_client();
+			return false;
+		}
+		cmd[len] = '\0';
+		server_new_window(get16(h), get16(h + 2), cmd);
 	} else if (type == MSG_INPUT) {
 		unsigned char h[8];
 		if (!read_all(g_client, h, sizeof(h))) {

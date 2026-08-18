@@ -29,6 +29,11 @@
 
 pid_t pty_spawn(int rows, int cols, int *master_out)
 {
+	return pty_spawn_cmd(rows, cols, master_out, NULL);
+}
+
+pid_t pty_spawn_cmd(int rows, int cols, int *master_out, const char *cmd)
+{
 	struct winsize ws = {
 		.ws_row = (unsigned short)rows,
 		.ws_col = (unsigned short)cols,
@@ -64,7 +69,14 @@ pid_t pty_spawn(int rows, int cols, int *master_out)
 		if (!shell || !*shell) {
 			shell = "/bin/sh";
 		}
-		execlp(shell, shell, (char *)NULL);
+		/* A launcher's command runs under the shell rather than being split
+		 * here, so redirections, pipelines and aliases behave as the user
+		 * typed them. Without one this is a plain interactive shell. */
+		if (cmd && *cmd) {
+			execlp(shell, shell, "-c", cmd, (char *)NULL);
+		} else {
+			execlp(shell, shell, (char *)NULL);
+		}
 		_exit(127);
 	}
 

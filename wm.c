@@ -391,6 +391,7 @@ void theme_apply(WM *wm)
 	settings_icon_redraw(wm);
 	exit_icon_redraw(wm);
 	die_icon_redraw(wm);
+	launcher_icons_redraw(wm);
 
 	/* Force a re-decode of any image background (palette/path may have changed),
 	 * then repaint the desktop. */
@@ -525,6 +526,11 @@ void wm_focus_next(WM *wm, int dir)
 
 Window *wm_spawn_window(WM *wm)
 {
+	return wm_spawn_command(wm, NULL);
+}
+
+Window *wm_spawn_command(WM *wm, const char *cmd)
+{
 	/* Cascade new windows from the top-left, but clear of the desktop settings
      * icon (which sits in roughly the leftmost ~13 columns). */
 	int n = wm->nwins;
@@ -537,7 +543,8 @@ Window *wm_spawn_window(WM *wm)
 	if (h < VP_MIN_H * 2)
 		h = (int)wm->scr_rows - y - 1;
 
-	if (!session_request_new(wm, h - 2 * VP_BORDER, w - 2 * VP_BORDER)) {
+	if (!session_request_new_cmd(wm, h - 2 * VP_BORDER, w - 2 * VP_BORDER,
+				     cmd)) {
 		return NULL;
 	}
 	session_drain(wm);
@@ -678,6 +685,7 @@ void wm_handle_resize(WM *wm)
 	settings_icon_reflow(wm);
 	exit_icon_reflow(wm);
 	die_icon_reflow(wm);
+	launcher_icons_reflow(wm);
 	for (int i = 0; i < wm->nwins; i++) {
 		Window *win = wm->wins[i];
 		if (win->maximized) {

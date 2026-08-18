@@ -1030,6 +1030,8 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
 			icon = wm->exit_icon;
 		} else if (die_icon_hit(wm, y, x)) {
 			icon = wm->die_icon;
+		} else {
+			icon = launcher_icon_at(wm, y, x);
 		}
 		if (icon) {
 			vp_rect r = comp_layer_abs(icon);
@@ -1135,6 +1137,7 @@ static void mouse_release(WM *wm, int btn, int y, int x, unsigned mods)
 			ax = r.x;
 		}
 		bool moved = (ay != wm->drag_icon_y0 || ax != wm->drag_icon_x0);
+		int launcher = launcher_icon_index(wm, icon);
 		if (moved) {
 			if (icon == wm->settings.icon) {
 				wm->config.settings_icon_y = ay;
@@ -1145,9 +1148,18 @@ static void mouse_release(WM *wm, int btn, int y, int x, unsigned mods)
 			} else if (icon == wm->die_icon) {
 				wm->config.die_icon_y = ay;
 				wm->config.die_icon_x = ax;
+			} else if (launcher >= 0) {
+				wm->config.launchers[launcher].y = ay;
+				wm->config.launchers[launcher].x = ax;
+				/* Moving one is an edit of the list like any other, so
+				 * the saved list becomes the authoritative one. */
+				config_manual_override(&wm->config,
+						       SETTING_LAUNCHERS);
 			}
 			config_save(&wm->config);
 			vp_log("icon: moved to y=%d x=%d (saved)\n", ay, ax);
+		} else if (launcher >= 0) {
+			launcher_icon_activate(wm, launcher);
 		} else if (icon == wm->settings.icon) {
 			settings_open(wm);
 		} else if (icon == wm->exit_icon) {
