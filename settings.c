@@ -239,6 +239,110 @@ static void clamp_scroll(WM *wm)
 		s->scroll = 0;
 }
 
+/* ----- the list scrollbar's geometry -------------------------------------
+ *
+ * Shared by the painter and the mouse handlers, so a click always lands on the
+ * thumb the user can actually see. The rail is the last interior column of the
+ * panel; its track is the viewport rows, i.e. panel rows 1..viewport_rows(). */
+
+/* Thumb geometry for a `v`-row track showing `n` rows from `scroll`. The thumb
+ * is sized proportionally and its travel spans the whole track, so it sits
+ * flush at the top at scroll 0 and flush at the bottom at the last scroll
+ * position. */
+static void scrollbar_thumb(int v, int n, int scroll, int *top, int *len)
+{
+	int thumb = (v * v + n - 1) / n; /* round up, so it is never 0 */
+	/* Always leave a cell of travel: a thumb filling the track would read as
+	 * "nothing to scroll" even with rows hidden (a list one row too long). */
+	if (thumb > v - 1)
+		thumb = v - 1;
+	if (thumb < 1)
+		thumb = 1;
+	int maxscroll = n - v;
+	if (scroll < 0)
+		scroll = 0;
+	if (scroll > maxscroll)
+		scroll = maxscroll;
+	*len = thumb;
+	*top = maxscroll > 0 ? (scroll * (v - thumb) + maxscroll / 2) / maxscroll :
+			       0;
+}
+
+/* Row count of the current view's scrolling list, or 0 for a view that has no
+ * scrollbar (the grid, and Terminal - which is sized to always fit). */
+static int list_len(const WM *wm)
+{
+	if (wm->settings.view == SETTINGS_VIEW_KEYBINDINGS) {
+		return total_rows();
+	}
+	if (wm->settings.view == SETTINGS_VIEW_APPEARANCE) {
+		return app_total_rows();
+	}
+	return 0;
+}
+
+/* True when the current view is showing a scrollbar, filling in the list
+ * length, track height and the rail's column within the panel. */
+static bool scrollbar_geom(const WM *wm, int *n, int *v, int *railx)
+{
+	if (!wm->settings.panel) {
+		return false;
+	}
+	int len = list_len(wm);
+	int rows = viewport_rows(wm);
+	if (len <= rows || rows < 1) {
+		return false;
+	}
+	*n = len;
+	*v = rows;
+	*railx = comp_layer_rect(wm->settings.panel).w - 2;
+	return true;
+}
+
+/* Scroll the list to `scroll` without going through the selection. The painters
+ * re-clamp scroll to keep the selection on screen, so the selection is carried
+ * along with the viewport rather than left behind to drag it back. */
+static void set_scroll(WM *wm, int n, int scroll)
+{
+	Settings *s = &wm->settings;
+	int v = viewport_rows(wm);
+	int maxscroll = n - v;
+	if (maxscroll < 0)
+		maxscroll = 0;
+	if (scroll < 0)
+		scroll = 0;
+	if (scroll > maxscroll)
+		scroll = maxscroll;
+	s->scroll = scroll;
+
+	if (s->sel < s->scroll)
+		s->sel = s->scroll;
+	if (s->sel > s->scroll + v - 1)
+		s->sel = s->scroll + v - 1;
+	if (s->sel < 0)
+		s->sel = 0;
+	if (s->sel >= n)
+		s->sel = n - 1;
+	settings_damage(s);
+}
+
+/* Put the thumb's top at track row `top`, inverting scrollbar_thumb(). */
+static void scroll_to_thumb(WM *wm, int n, int v, int top)
+{
+	int tt, len;
+	scrollbar_thumb(v, n, wm->settings.scroll, &tt, &len);
+	int travel = v - len;
+	if (travel < 1) {
+		return; /* a one-row track: nowhere to drag to */
+	}
+	if (top < 0)
+		top = 0;
+	if (top > travel)
+		top = travel;
+	int maxscroll = n - v;
+	set_scroll(wm, n, (top * maxscroll + travel / 2) / travel);
+}
+
 /* Resting top-left of the Settings tile: a user-dragged position from the
  * config if there is one, otherwise the built-in top-left corner. Always
  * clamped onto the current screen. */
@@ -554,6 +658,7 @@ void settings_open(WM *wm)
 	s->capturing = false;
 	s->sel = 0;
 	s->scroll = 0;
+	s->sb_drag = false;
 	snprintf(s->status, sizeof(s->status),
 		 "↑/↓/←/→: select   Enter: open   Esc: close");
 	vp_log("settings: open\n");
@@ -571,6 +676,7 @@ static void settings_set_view(WM *wm, settings_view v)
 	s->view = v;
 	s->capturing = false;
 	s->editing = false;
+	s->sb_drag = false;
 	settings_damage(s);
 	if (v == SETTINGS_VIEW_KEYBINDINGS) {
 		s->sel = 0;
@@ -613,6 +719,7 @@ void settings_close(WM *wm)
 	s->open = false;
 	s->capturing = false;
 	s->editing = false;
+	s->sb_drag = false;
 	comp_layer_destroy(s->panel);
 	s->panel = NULL;
 	config_save(&wm->config);
@@ -1267,6 +1374,28 @@ void settings_click(WM *wm, int btn, int y, int x)
 	int rely = y - ay;
 	int relx = x - ax;
 
+	/* The scrollbar, if this view has one: grab the thumb, or click anywhere
+	 * on the track to jump there. Either way the button is now held on the
+	 * thumb, so both continue as a drag. Checked before the row hit tests
+	 * because the rail sits inside the list area. Text entry owns the mouse
+	 * while it is up, matching the Appearance view's "ignore clicks" rule. */
+	int n, v, railx;
+	if (!s->editing && scrollbar_geom(wm, &n, &v, &railx) && relx == railx &&
+	    rely >= 1 && rely <= v) {
+		int cell = rely - 1;
+		int top, len;
+		scrollbar_thumb(v, n, s->scroll, &top, &len);
+		if (cell < top || cell >= top + len) {
+			scroll_to_thumb(wm, n, v, cell - len / 2);
+		}
+		/* Anchor the drag wherever it ends up: a grab that does not move
+		 * must not move the list, so motion is measured from here. */
+		s->sb_drag = true;
+		s->sb_cell0 = cell;
+		s->sb_scroll0 = s->scroll;
+		return;
+	}
+
 	if (s->view == SETTINGS_VIEW_GRID) {
 		for (int i = 0; i < GRID_ENTRY_COUNT; i++) {
 			int ty, tx;
@@ -1316,6 +1445,58 @@ void settings_click(WM *wm, int btn, int y, int x)
 			settings_damage(s);
 		}
 	}
+}
+
+/* Pointer motion with the button down: only the scrollbar tracks it. The list
+ * moves by whole track cells away from the anchor, so the thumb stays under the
+ * pointer. Only the row matters - the pointer is free to wander off the rail,
+ * and a drag ends on release, not on leaving the panel. */
+void settings_drag(WM *wm, int y, int x)
+{
+	(void)x;
+	Settings *s = &wm->settings;
+	if (!s->open || !s->sb_drag) {
+		return;
+	}
+	int n, v, railx;
+	if (!scrollbar_geom(wm, &n, &v, &railx)) {
+		s->sb_drag = false; /* the list shrank out from under the drag */
+		return;
+	}
+	int top, len;
+	scrollbar_thumb(v, n, s->sb_scroll0, &top, &len);
+	int travel = v - len;
+	if (travel < 1) {
+		return; /* a one-row track: nowhere to drag to */
+	}
+	int cell = y - comp_layer_abs(s->panel).y - 1;
+	int cells = cell - s->sb_cell0;
+	int maxscroll = n - v;
+
+	/* Dragging to either end of the rail means that end of the list. The
+	 * proportional step can land a row short there (it rounds), and it is
+	 * the one place the user is unambiguous about what they want. Gated on
+	 * having actually moved that way, so a motionless grab on an end cell
+	 * still does nothing. */
+	if (cells < 0 && cell <= 0) {
+		set_scroll(wm, n, 0);
+		return;
+	}
+	if (cells > 0 && cell >= v - 1) {
+		set_scroll(wm, n, maxscroll);
+		return;
+	}
+
+	/* Round half away from zero, so dragging up and back down again lands
+	 * on the row it started from rather than creeping. */
+	int half = travel / 2;
+	int delta = (cells * maxscroll + (cells >= 0 ? half : -half)) / travel;
+	set_scroll(wm, n, s->sb_scroll0 + delta);
+}
+
+void settings_release(WM *wm)
+{
+	wm->settings.sb_drag = false;
 }
 
 void settings_scroll(WM *wm, int dir)
@@ -1382,6 +1563,28 @@ static void draw_status(WM *wm, struct ncplane *p, int W, int H,
 	char sbuf[128];
 	snprintf(sbuf, sizeof(sbuf), "%-*.*s", W - 4, W - 4, status);
 	ncplane_putstr_yx(p, H - 2, 2, sbuf);
+}
+
+/* A vertical scrollbar down the last interior column of a list view, so a list
+ * that overflows its viewport says so instead of just looking truncated. Drawn
+ * only when it is needed; the rows are laid out one column narrower in that
+ * case (see the callers), so the rail never lands on top of a value. */
+static void draw_scrollbar(WM *wm, struct ncplane *p, int W, int v, int n,
+			   int scroll)
+{
+	if (n <= v || v < 1) {
+		return;
+	}
+	int top, len;
+	scrollbar_thumb(v, n, scroll, &top, &len);
+
+	vp_setbg(p, wm->theme.panel_bg);
+	for (int i = 0; i < v; i++) {
+		bool on_thumb = i >= top && i < top + len;
+		vp_setfg(p, on_thumb ? wm->theme.panel_accent :
+				       wm->theme.panel_hint);
+		ncplane_putegc_yx(p, 1 + i, W - 2, on_thumb ? "█" : "│", NULL);
+	}
 }
 
 /* ----- the Control-Panel grid -------------------------------------------- */
@@ -1508,6 +1711,9 @@ static void draw_keybindings(WM *wm, struct ncplane *p, int W, int H)
 {
 	Settings *s = &wm->settings;
 	int v = viewport_rows(wm);
+	int n = total_rows();
+	/* Rows give up a column to the scrollbar only when there is one. */
+	int roww = W - (n > v ? 1 : 0);
 
 	clamp_scroll(wm);
 	ncplane_erase(p);
@@ -1515,7 +1721,7 @@ static void draw_keybindings(WM *wm, struct ncplane *p, int W, int H)
 
 	for (int i = 0; i < v; i++) {
 		int row = s->scroll + i;
-		if (row >= total_rows()) {
+		if (row >= n) {
 			break;
 		}
 		char chord[64];
@@ -1530,9 +1736,10 @@ static void draw_keybindings(WM *wm, struct ncplane *p, int W, int H)
 			keymap_chord_for_action(&wm->config, act, chord,
 						sizeof(chord));
 		}
-		draw_row(wm, p, 1 + i, W, label, chord, row == s->sel,
+		draw_row(wm, p, 1 + i, roww, label, chord, row == s->sel,
 			 s->capturing && row == s->sel);
 	}
+	draw_scrollbar(wm, p, W, v, n, s->scroll);
 
 	/* Status + hint lines. */
 	vp_setbg(p, wm->theme.panel_bg);
@@ -1632,14 +1839,16 @@ static void draw_appearance(WM *wm, struct ncplane *p, int W, int H)
 {
 	Settings *s = &wm->settings;
 	int v = viewport_rows(wm);
+	int n = app_total_rows();
+	int roww = W - (n > v ? 1 : 0);
 
-	clamp_scroll_n(wm, app_total_rows());
+	clamp_scroll_n(wm, n);
 	ncplane_erase(p);
 	draw_border(wm, p, W, H, " Appearance ");
 
 	for (int i = 0; i < v; i++) {
 		int row = s->scroll + i;
-		if (row >= app_total_rows()) {
+		if (row >= n) {
 			break;
 		}
 		char label[64], val[160];
@@ -1658,12 +1867,13 @@ static void draw_appearance(WM *wm, struct ncplane *p, int W, int H)
 			 * (that prompt is only for the keybinding editor). */
 			char buf[sizeof(s->input) + 2];
 			snprintf(buf, sizeof(buf), "%s_", s->input);
-			draw_row(wm, p, 1 + i, W, label, buf, true, false);
+			draw_row(wm, p, 1 + i, roww, label, buf, true, false);
 		} else {
-			draw_row(wm, p, 1 + i, W, label, val, row == s->sel,
+			draw_row(wm, p, 1 + i, roww, label, val, row == s->sel,
 				 false);
 		}
 	}
+	draw_scrollbar(wm, p, W, v, n, s->scroll);
 
 	/* Status + hint lines (mirrors the other editors' footer). */
 	vp_setbg(p, wm->theme.panel_bg);

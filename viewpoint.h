@@ -426,6 +426,15 @@ typedef struct Settings {
 	int input_len;
 	int edit_kind; /* 0 = image path, 1 = color hex */
 	int edit_color_idx; /* VpTheme color-field index when edit_kind == 1 */
+
+	/* Scrollbar drag: set while the left button is held on the thumb. The
+	 * drag is anchored rather than absolute - it moves the list by whole
+	 * track cells away from where it was grabbed - because several scroll
+	 * positions share a thumb cell, so mapping the pointer straight onto a
+	 * scroll value would snap the list the moment the thumb was touched. */
+	bool sb_drag;
+	int sb_cell0; /* track row the drag was anchored at */
+	int sb_scroll0; /* scroll when it was anchored */
 } Settings;
 
 typedef struct WM {
@@ -773,6 +782,8 @@ bool settings_icon_hit(WM *wm, int y, int x);
 /* Modal input handlers (called only while the editor is open). */
 void settings_handle_key(WM *wm, const ncinput *ni);
 void settings_click(WM *wm, int btn, int y, int x);
+void settings_drag(WM *wm, int y, int x);
+void settings_release(WM *wm);
 void settings_scroll(WM *wm, int dir);
 /* Mark the modal panel for repaint (no-op when it isn't open). */
 void settings_damage(Settings *s);

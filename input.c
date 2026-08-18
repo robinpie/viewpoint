@@ -1218,6 +1218,10 @@ static void mouse_event(WM *wm, mev_type t, int btn, int y, int x,
 	if (wm->settings.open) {
 		if (t == MEV_PRESS) {
 			settings_click(wm, btn, y, x);
+		} else if (t == MEV_MOTION) {
+			settings_drag(wm, y, x);
+		} else if (t == MEV_RELEASE) {
+			settings_release(wm);
 		} else if (t == MEV_SCROLL_UP) {
 			settings_scroll(wm, -1);
 		} else if (t == MEV_SCROLL_DOWN) {
@@ -1275,10 +1279,13 @@ void input_route_mouse(WM *wm, const ncinput *ni)
 		int btn = (int)(ni->id - NCKEY_BUTTON1) + 1;
 		if (ni->evtype == NCTYPE_RELEASE) {
 			mouse_event(wm, MEV_RELEASE, btn, y, x, mods);
-		} else if (wm->drag != DRAG_NONE ||
+		} else if (wm->drag != DRAG_NONE || wm->settings.sb_drag ||
 			   ni->evtype == NCTYPE_REPEAT) {
 			/* notcurses reports a held-button drag as a fresh PRESS, so
-			 * treat any non-release event as motion once dragging. */
+			 * treat any non-release event as motion once dragging. Every
+			 * drag we own has to be listed here: one that isn't gets its
+			 * motion delivered as a press, and the press lands on
+			 * whatever the pointer has drifted over. */
 			mouse_event(wm, MEV_MOTION, btn, y, x, mods);
 		} else {
 			mouse_event(wm, MEV_PRESS, btn, y, x, mods);
