@@ -57,6 +57,13 @@
  * drag to arm an edge/corner snap. */
 #define VP_SNAP_EDGE 2
 
+/* Resize size indicator (sizeosd.c): how long the box holds at full strength
+ * after the last resize, how long it then takes to fade out, and how often the
+ * fade repaints while it runs. */
+#define VP_SIZEOSD_HOLD_MS 600
+#define VP_SIZEOSD_FADE_MS 500
+#define VP_SIZEOSD_STEP_MS 50
+
 /* Max gap (milliseconds) between two title-bar clicks for them to count as a
  * double-click (which toggles maximize). */
 #define VP_DBLCLICK_MS 400
@@ -518,6 +525,17 @@ typedef struct WM {
 	vp_snapzone snap_preview; /* currently-shown snap outline */
 	vp_layer *snap_layer;
 
+	/* Resize size indicator: a box centered on the window being resized,
+	 * reporting its grid size, held then faded out on a timer rather than on
+	 * an event (see sizeosd.c). Inactive while `sizeosd_active` is false,
+	 * whatever the layer pointer says - the layer is kept for reuse once
+	 * created. The window is held by id, since it can be closed mid-fade. */
+	vp_layer *sizeosd;
+	char sizeosd_text[24];
+	int sizeosd_win; /* id of the window it is centered on */
+	uint64_t sizeosd_at_ms; /* CLOCK_MONOTONIC when it last (re)appeared */
+	bool sizeosd_active;
+
 	/* Desktop-icon drag (DRAG_ICON): tile's top-left at grab time, so a release
 	 * that didn't move it can be treated as a plain click instead. */
 	vp_layer *drag_icon;
@@ -874,6 +892,24 @@ void input_route_mouse(WM *wm, const ncinput *ni);
 void gpm_setup(WM *wm);
 void gpm_pump(WM *wm);
 void gpm_teardown(WM *wm);
+
+/* ------------------------------------------------------------------------- */
+/* sizeosd.c                                                                 */
+/* ------------------------------------------------------------------------- */
+
+/* Pop up the size indicator for `win`'s new grid size, restarting its
+ * hold-then-fade cycle. Ignored for any window but the focused one. Called
+ * from window_set_geometry, so every resize route reaches it. */
+void sizeosd_show(WM *wm, Window *win);
+
+/* Re-place the box over its window and advance the fade one step, retiring it
+ * once it has run out or its window has gone. Called once per event-loop pass,
+ * before rendering - which is what keeps it glued to a window being dragged. */
+void sizeosd_tick(WM *wm);
+
+/* Milliseconds until the next fade step is due, or -1 when nothing is
+ * pending - i.e. exactly what poll(2) wants for its timeout. */
+int sizeosd_timeout_ms(const WM *wm);
 
 /* ------------------------------------------------------------------------- */
 /* taskbar.c                                                                 */

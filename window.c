@@ -173,6 +173,10 @@ void window_set_geometry(Window *win, int x, int y, int w, int h)
 		} else {
 			session_resize(win, rows, cols);
 		}
+		/* Every resize route lands here, so the size indicator only has to
+		 * be armed in this one place (it decides for itself whether this
+		 * window is the one the user is working on). */
+		sizeosd_show(win->wm, win);
 	}
 	window_damage_frame(win);
 }

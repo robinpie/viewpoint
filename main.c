@@ -225,7 +225,9 @@ int main(int argc, char **argv)
 			gpm_idx = nfd++;
 		}
 
-		int pr = poll(pfds, (nfds_t)nfd, -1);
+		/* The only thing that ever needs waking without an fd being ready
+		 * is the resize size indicator's fade; -1 whenever it isn't running. */
+		int pr = poll(pfds, (nfds_t)nfd, sizeosd_timeout_ms(&wm));
 		if (pr < 0) {
 			if (errno == EINTR) {
 				if (g_sigchld) {
@@ -275,6 +277,7 @@ int main(int argc, char **argv)
 		}
 
 		if (!quit) {
+			sizeosd_tick(&wm);
 			wm_render(&wm);
 		}
 	}
