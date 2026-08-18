@@ -78,8 +78,8 @@ static void sixbuf_append(Window *w, const char *bytes, size_t n)
 /* ------------------------------------------------------------------------- */
 
 /* Decode the accumulated sixel payload into a freshly-malloc'd packed RGBA
- * buffer (R,G,B,A bytes in memory, as ncvisual_from_rgba expects). Returns NULL
- * on failure; on success sets the out dimensions and the caller frees it. */
+ * buffer (R,G,B,A bytes in memory, as the compositor expects). Returns NULL on
+ * failure; on success sets the out dimensions and the caller owns the buffer. */
 static uint32_t *sixel_to_rgba(const unsigned char *bytes, int len, int *out_w,
 			       int *out_h)
 {
@@ -202,12 +202,6 @@ static void sixel_emit(Window *w)
 	int currow = w->currow < 0 ? 0 : w->currow;
 	int curcol = w->curcol < 0 ? 0 : w->curcol;
 
-	struct ncvisual *v = ncvisual_from_rgba(rgba, ih, iw * 4, iw);
-	free(rgba);
-	if (!v) {
-		return;
-	}
-
 	/* Footprint in cells, for the cursor advance and the anchor arithmetic. */
 	unsigned celldimy = 0, celldimx = 0;
 	ncplane_pixel_geom(comp_layer_plane(w->content), NULL, NULL, &celldimy,
@@ -219,7 +213,7 @@ static void sixel_emit(Window *w)
 		int cap = w->images_cap ? w->images_cap * 2 : 4;
 		vp_image *na = realloc(w->images, (size_t)cap * sizeof(*na));
 		if (!na) {
-			ncvisual_destroy(v);
+			free(rgba);
 			return;
 		}
 		w->images = na;
@@ -227,12 +221,12 @@ static void sixel_emit(Window *w)
 	}
 
 	/* Hand the pixels to the compositor, anchored where the cursor is now.
-	 * It retains them, so the bitmap can come and go as the view scrolls
-	 * without ever being re-decoded. */
-	vp_graphic *g =
-		comp_graphic_add(w->content, v, currow, curcol, cell_h, cell_w);
+	 * It retains them, so the bitmap can come and go as the view scrolls -
+	 * and be re-cropped at a window edge - without ever being re-decoded. */
+	vp_graphic *g = comp_graphic_add(w->content, rgba, ih, iw, currow,
+					 curcol, cell_h, cell_w);
 	if (!g) {
-		return; /* comp_graphic_add consumed the visual */
+		return; /* comp_graphic_add took the pixels either way */
 	}
 	vp_image *img = &w->images[w->nimages++];
 	img->gfx = g;

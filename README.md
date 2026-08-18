@@ -186,7 +186,7 @@ viewpoint renders inline sixel images (but it's still kinda busted, working on t
 
 ### Graphics limitations
 
-Resizing a window clears its images (the reflow isn't tracked for fixed-pixel placement), and an image only partway on-screen is hidden until it fully fits.
+Resizing a window clears its images.
 
 ## Roadmap
 

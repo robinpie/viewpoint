@@ -133,97 +133,151 @@ static const char *expand_tilde(const char *path, char *buf, size_t buflen)
 	return path;
 }
 
-static struct ncplane *bg_blit(WM *wm, struct ncplane *parent, int y, int x,
-			       ncscale_e scale)
-{
-	struct ncvisual_options o = { 0 };
-	o.n = parent;
-	o.y = y;
-	o.x = x;
-	o.scaling = scale;
-	o.blitter = NCBLIT_PIXEL;
-	o.flags = NCVISUAL_OPTION_CHILDPLANE;
-	return ncvisual_blit(wm->nc, wm->bg_visual, &o);
-}
+/* A wallpaper fitted to the desktop: packed RGBA plus where it goes. The
+ * compositor takes the pixels, so it - not us - decides when the bitmap is
+ * actually on screen. */
+typedef struct bg_bitmap {
+	uint32_t *rgba;
+	int px_h, px_w;
+	int cell_y, cell_x; /* anchor within the desktop area */
+	int cell_h, cell_w;
+} bg_bitmap;
 
-/* Compose the source image tiled across the desktop into one RGBA buffer and
- * blit it as a single pixel-bitmap plane - many separate tiled planes cascade
- * under kitty backends (e.g. Konsole), which only reliably composite one
- * sprixel. Returns the plane (child of `area`), or NULL on failure. */
-static struct ncplane *bg_blit_tiled(WM *wm, struct ncplane *area, int ah,
-				     int aw)
+/* Read a visual back out as packed RGBA. The compositor wants pixels, and this
+ * is the only way out of an ncvisual. */
+static uint32_t *visual_rgba(struct ncvisual *v, int h, int w)
 {
-	ncvgeom g;
-	struct ncvisual_options probe = { .blitter = NCBLIT_PIXEL,
-					  .scaling = NCSCALE_NONE };
-	if (ncvisual_geom(wm->nc, wm->bg_visual, &probe, &g) != 0 ||
-	    g.pixy == 0 || g.pixx == 0 || g.cdimy == 0 || g.cdimx == 0) {
+	uint32_t *buf = malloc((size_t)h * (size_t)w * sizeof(*buf));
+	if (!buf) {
 		return NULL;
 	}
-	int sh = (int)g.pixy, sw = (int)g.pixx;
-	int dh = ah * (int)g.cdimy, dw = aw * (int)g.cdimx;
-	if (dh <= 0 || dw <= 0) {
-		return NULL;
-	}
-
-	size_t srow = (size_t)sw * 4;
-	unsigned char *src = malloc((size_t)sh * srow);
-	if (!src) {
-		return NULL;
-	}
-	for (int y = 0; y < sh; y++) {
-		for (int x = 0; x < sw; x++) {
+	for (int y = 0; y < h; y++) {
+		for (int x = 0; x < w; x++) {
 			uint32_t px = 0;
-			ncvisual_at_yx(wm->bg_visual, (unsigned)y, (unsigned)x,
-				       &px);
-			unsigned char *d = src + (size_t)y * srow + (size_t)x * 4;
+			ncvisual_at_yx(v, (unsigned)y, (unsigned)x, &px);
+			unsigned char *d =
+				(unsigned char *)&buf[(size_t)y * w + x];
 			d[0] = ncpixel_r(px);
 			d[1] = ncpixel_g(px);
 			d[2] = ncpixel_b(px);
 			d[3] = ncpixel_a(px);
 		}
 	}
+	return buf;
+}
 
-	size_t drow = (size_t)dw * 4;
-	unsigned char *dst = malloc((size_t)dh * drow);
+/* The source image resampled to ph x pw pixels. Resizing is destructive, so it
+ * happens on a throwaway copy and wm->bg_visual stays pristine for the next
+ * fit or resize. */
+static uint32_t *bg_resample(WM *wm, int sh, int sw, int ph, int pw)
+{
+	uint32_t *src = visual_rgba(wm->bg_visual, sh, sw);
+	if (!src) {
+		return NULL;
+	}
+	if (ph == sh && pw == sw) {
+		return src; /* already the right size */
+	}
+	struct ncvisual *tmp = ncvisual_from_rgba(src, sh, sw * 4, sw);
+	free(src);
+	if (!tmp) {
+		return NULL;
+	}
+	uint32_t *out = NULL;
+	if (ncvisual_resize(tmp, ph, pw) == 0) {
+		out = visual_rgba(tmp, ph, pw);
+	}
+	ncvisual_destroy(tmp);
+	return out;
+}
+
+/* The source image tiled edge to edge across dh x dw pixels. One buffer, not a
+ * grid of planes: many separate tiled sprixels cascade under kitty backends
+ * (e.g. Konsole), which only reliably composite one bitmap per region. */
+static uint32_t *bg_tile(WM *wm, int sh, int sw, int dh, int dw)
+{
+	uint32_t *src = visual_rgba(wm->bg_visual, sh, sw);
+	if (!src) {
+		return NULL;
+	}
+	uint32_t *dst = malloc((size_t)dh * (size_t)dw * sizeof(*dst));
 	if (!dst) {
 		free(src);
 		return NULL;
 	}
 	for (int y = 0; y < dh; y++) {
-		unsigned char *s = src + (size_t)(y % sh) * srow;
-		unsigned char *d = dst + (size_t)y * drow;
-		size_t filled = 0;
-		while (filled < drow) {
-			size_t chunk = srow;
-			if (chunk > drow - filled) {
-				chunk = drow - filled;
-			}
-			memcpy(d + filled, s, chunk);
-			filled += chunk;
+		const uint32_t *srow = src + (size_t)(y % sh) * sw;
+		uint32_t *drow = dst + (size_t)y * dw;
+		for (int x = 0; x < dw; x += sw) {
+			int run = dw - x < sw ? dw - x : sw;
+			memcpy(drow + x, srow, (size_t)run * sizeof(*dst));
 		}
 	}
 	free(src);
-
-	struct ncvisual *tiled = ncvisual_from_rgba(dst, dh, (int)drow, dw);
-	free(dst);
-	if (!tiled) {
-		return NULL;
-	}
-	struct ncvisual_options o = { .n = area,
-				      .scaling = NCSCALE_NONE,
-				      .blitter = NCBLIT_PIXEL,
-				      .flags = NCVISUAL_OPTION_CHILDPLANE };
-	struct ncplane *p = ncvisual_blit(wm->nc, tiled, &o);
-	ncvisual_destroy(tiled);
-	return p;
+	return dst;
 }
 
-static void bg_center(struct ncplane *p, int bound_h, int bound_w)
+/* Fit the source image to the `ah` x `aw` cell desktop area per `fit`, filling
+ * `out`. False (with nothing allocated) if it cannot be built. */
+static bool bg_fit_bitmap(WM *wm, vp_bg_fit fit, int ah, int aw, int cdimy,
+			  int cdimx, int sh, int sw, bg_bitmap *out)
 {
-	unsigned ph, pw;
-	ncplane_dim_yx(p, &ph, &pw);
-	ncplane_move_yx(p, (bound_h - (int)ph) / 2, (bound_w - (int)pw) / 2);
+	int area_h = ah * cdimy, area_w = aw * cdimx;
+	int ph = area_h, pw = area_w;
+
+	switch (fit) {
+	case FIT_STRETCH:
+		break; /* the whole area, aspect be damned */
+	case FIT_CENTER:
+		/* Native size, unless that would spill past the area (and onto
+		 * the taskbar row); then fall through to fitting it. */
+		if (sh <= area_h && sw <= area_w) {
+			ph = sh;
+			pw = sw;
+			break;
+		}
+		/* fallthrough */
+	case FIT_SCALE: {
+		/* Largest aspect-preserving fit inside the area. */
+		double k = (double)area_w / sw;
+		double ky = (double)area_h / sh;
+		if (ky < k) {
+			k = ky;
+		}
+		ph = (int)(sh * k);
+		pw = (int)(sw * k);
+		if (ph < 1) {
+			ph = 1;
+		}
+		if (pw < 1) {
+			pw = 1;
+		}
+		break;
+	}
+	case FIT_TILE:
+		break; /* the whole area, by repetition */
+	}
+
+	uint32_t *rgba = (fit == FIT_TILE) ? bg_tile(wm, sh, sw, ph, pw) :
+					     bg_resample(wm, sh, sw, ph, pw);
+	if (!rgba) {
+		return false;
+	}
+	out->rgba = rgba;
+	out->px_h = ph;
+	out->px_w = pw;
+	out->cell_h = (ph + cdimy - 1) / cdimy;
+	out->cell_w = (pw + cdimx - 1) / cdimx;
+	/* Centre what does not fill the area; a full-area fit lands at 0,0. */
+	out->cell_y = (ah - out->cell_h) / 2;
+	out->cell_x = (aw - out->cell_w) / 2;
+	if (out->cell_y < 0) {
+		out->cell_y = 0;
+	}
+	if (out->cell_x < 0) {
+		out->cell_x = 0;
+	}
+	return true;
 }
 
 /* The background mode we can actually honour: an image needs pixel support and
@@ -289,8 +343,12 @@ static void desktop_paint(struct ncplane *p, bool full, void *user)
 }
 
 /* (Re)build the desktop background. For BG_IMAGE this creates one backdrop-band
- * layer covering the desktop with the blitted bitmap as a sublayer, so a
- * single destroy takes it all down and the band keeps it under every window. */
+ * layer covering the desktop and hands the fitted pixels to the compositor as a
+ * graphic on it, so a single destroy takes it all down and the band keeps it
+ * under every window. Registering it as a graphic rather than blitting it
+ * ourselves is what lets the compositor stand it down when an inline image in
+ * some window would otherwise overlap it: terminals composite one bitmap per
+ * region and no more. */
 void background_apply(WM *wm)
 {
 	bg_drop(wm, false); /* keep any retained visual for re-blit */
@@ -303,8 +361,7 @@ void background_apply(WM *wm)
 
 	/* Confine the image to the desktop area above the taskbar: a pixel bitmap
 	 * that reaches the last physical row (or hangs off an edge) makes some
-	 * terminals scroll the whole display. The bitmap is a child of `area`, so
-	 * STRETCH/SCALE size to it and CENTER/TILE stay inside it. */
+	 * terminals scroll the whole display. */
 	int aw = (int)wm->scr_cols;
 	int ah = (int)wm->scr_rows - (wm->taskbar ? 1 : 0);
 	if (ah < 1) {
@@ -315,51 +372,37 @@ void background_apply(WM *wm)
 	if (!wm->bg_layer) {
 		return;
 	}
+	/* See-through: the base cell is transparent so letterboxing (and the
+	 * whole area, whenever the bitmap stands down) reads as the desktop
+	 * underneath, and damage must reach the desktop painter through it. */
 	struct ncplane *area = comp_layer_plane(wm->bg_layer);
 	uint64_t tb = 0;
 	ncchannels_set_fg_alpha(&tb, NCALPHA_TRANSPARENT);
 	ncchannels_set_bg_alpha(&tb, NCALPHA_TRANSPARENT);
 	ncplane_set_base(area, "", 0, tb);
+	comp_layer_set_opaque(wm->bg_layer, false);
 
-	struct ncplane *img = NULL;
-	switch (wm->theme.bg_fit) {
-	case FIT_STRETCH:
-		img = bg_blit(wm, area, 0, 0, NCSCALE_STRETCH);
-		break;
-	case FIT_SCALE:
-		img = bg_blit(wm, area, 0, 0, NCSCALE_SCALE);
-		if (img) {
-			bg_center(img, ah, aw);
-		}
-		break;
-	case FIT_CENTER: {
-		img = bg_blit(wm, area, 0, 0, NCSCALE_NONE);
-		if (img) {
-			unsigned ph, pw;
-			ncplane_dim_yx(img, &ph, &pw);
-			if ((int)ph > ah || (int)pw > aw) {
-				/* Too big to centre without spilling onto the
-				 * taskbar row: fit it instead. */
-				ncplane_destroy(img);
-				img = bg_blit(wm, area, 0, 0, NCSCALE_SCALE);
-			}
-		}
-		if (img) {
-			bg_center(img, ah, aw);
-		}
-		break;
+	ncvgeom g;
+	struct ncvisual_options probe = { .blitter = NCBLIT_PIXEL,
+					  .scaling = NCSCALE_NONE };
+	if (ncvisual_geom(wm->nc, wm->bg_visual, &probe, &g) != 0 ||
+	    g.pixy == 0 || g.pixx == 0 || g.cdimy == 0 || g.cdimx == 0) {
+		return;
 	}
-	case FIT_TILE:
-		/* One desktop-sized bitmap of the tiled image, edge to edge. */
-		img = bg_blit_tiled(wm, area, ah, aw);
-		if (!img) {
-			img = bg_blit(wm, area, 0, 0, NCSCALE_STRETCH);
-		}
-		break;
+
+	bg_bitmap bm;
+	if (!bg_fit_bitmap(wm, wm->theme.bg_fit, ah, aw, (int)g.cdimy,
+			   (int)g.cdimx, (int)g.pixy, (int)g.pixx, &bm)) {
+		return;
 	}
-	if (img) {
-		comp_sublayer_adopt(wm->bg_layer, img, wm);
-	}
+	/* Takes the pixels either way; the layer owns the graphic from here. */
+	vp_graphic *bg = comp_graphic_add(wm->bg_layer, bm.rgba, bm.px_h,
+					  bm.px_w, bm.cell_y, bm.cell_x,
+					  bm.cell_h, bm.cell_w);
+	/* All-or-nothing: an inline image somewhere would otherwise trim the
+	 * wallpaper to a band, and half a patterned desktop reads as a bug
+	 * rather than as a window being in front of it. */
+	comp_graphic_set_atomic(bg, true);
 }
 
 void theme_apply(WM *wm)

@@ -23,8 +23,10 @@
  * Stacking is declarative (band + order, reconciled by comp_frame) rather than
  * imperative raise-calls; layer geometry is read from vp_layer, never from
  * notcurses, so a hidden (off-screen-parked) layer can't corrupt later math.
- * Pixel graphics are declared, not placed - the compositor blits them only
- * when actually visible. A no-op frame presents nothing.
+ * Pixel graphics are declared, not placed - the compositor blits the part of
+ * each that is really on screen, cropped to its owner window and the display,
+ * and leaves occlusion by higher layers to notcurses' per-cell sprixel wiping.
+ * A no-op frame presents nothing.
  */
 #ifndef VP_COMPOSITOR_H
 #define VP_COMPOSITOR_H
@@ -135,9 +137,9 @@ void comp_layer_show(vp_layer *l, bool visible);
 bool comp_layer_visible(const vp_layer *l);
 
 /* Whether the layer's rect can be assumed to fully cover what is beneath it.
- * Only used to decide whether it occludes a pixel bitmap, which cannot be
- * blended with cells above it. Layers default to opaque; the snap outline and
- * other see-through overlays must clear it. */
+ * Used to cut damage propagation short: repainting under a layer that hides
+ * everything there is wasted work. Layers default to opaque; the snap outline
+ * and other see-through overlays must clear it. */
 void comp_layer_set_opaque(vp_layer *l, bool opaque);
 
 /* Mark a layer as needing a repaint on the next frame. The _full variant also
@@ -162,11 +164,24 @@ vp_layer *comp_layer_at(vp_comp *c, vp_band band, int y, int x);
 /* ------------------------------------------------------------------------- */
 
 /* Attach a decoded bitmap to `owner` at an owner-relative cell anchor, sized
- * `cell_h` x `cell_w`. Takes ownership of `v`. The bitmap is declared, not
- * placed: the compositor blits it only when genuinely visible. Returns NULL
- * (destroying `v`) if the terminal has no pixel support or on OOM. */
-vp_graphic *comp_graphic_add(vp_layer *owner, struct ncvisual *v, int local_y,
-			     int local_x, int cell_h, int cell_w);
+ * `cell_h` x `cell_w`. `rgba` is packed RGBA, `px_h` rows of `px_w`, and is
+ * taken over by the compositor (freed even on failure) - it keeps the pixels
+ * rather than an ncvisual so it can re-cut a crop out of them at any time. The
+ * bitmap is declared, not placed: the compositor blits whatever part of it is
+ * genuinely on screen, cropping at the owner's edges and the screen's, so an
+ * image hanging halfway out of a window keeps showing the half that fits.
+ * Returns NULL if the terminal has no pixel support or on OOM. */
+vp_graphic *comp_graphic_add(vp_layer *owner, uint32_t *rgba, int px_h,
+			     int px_w, int local_y, int local_x, int cell_h,
+			     int cell_w);
+
+/* Two bitmaps are never blitted overlapping - terminals composite one per
+ * region and no more - so a bitmap gives way to any stacked above it, trimmed
+ * back to the largest area that still clears them. Marking one atomic makes it
+ * all-or-nothing instead: it stands down entirely rather than show a fragment.
+ * For a backdrop, where a partial fill reads as a glitch rather than as
+ * something being in front of it. */
+void comp_graphic_set_atomic(vp_graphic *g, bool atomic);
 
 /* Re-anchor a graphic within its owner (a scrollback view that moved). */
 void comp_graphic_move(vp_graphic *g, int local_y, int local_x);

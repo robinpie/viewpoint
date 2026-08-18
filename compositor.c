@@ -61,18 +61,30 @@ struct vp_layer {
 struct vp_graphic {
 	vp_comp *comp;
 	vp_layer *owner;
-	struct ncvisual *visual; /* retained so the bitmap can be re-blitted */
+	/* The decoded pixels, retained so the bitmap can be re-blitted (and
+	 * re-cropped) without going back to the decoder. Packed RGBA, px_h rows
+	 * of px_w, owned by the graphic. */
+	uint32_t *rgba;
+	int px_h, px_w;
 	struct ncplane *plane; /* live sprixel, or NULL while not shown */
 
 	int y, x; /* owner-relative cell anchor */
 	int h, w; /* footprint in cells */
+	/* Where the picture actually is, in cells relative to the anchor. Most
+	 * bitmaps arrive padded; a trim that ignored this would happily keep a
+	 * big empty band and slice through the part worth showing. */
+	vp_rect content;
+	bool atomic; /* stand down entirely rather than be trimmed */
 
 	/* What is actually on screen, for diffing against what should be. Compared
 	 * in owner-local coords, since the bitmap rides its owner's plane for
 	 * free; re-emitting one that merely rode along wastes work and can leave
-	 * smears trailing behind a dragged window. */
+	 * smears trailing behind a dragged window. `shown_local` is the crop that
+	 * survived clipping, which is the whole footprint only while nothing cuts
+	 * into it. */
 	bool shown;
 	int shown_y, shown_x; /* owner-local anchor of the live bitmap */
+	vp_rect shown_local; /* owner-local rect of the blitted crop */
 	vp_rect shown_abs; /* where it currently sits on screen */
 	uint32_t shown_order; /* stacking revision it was blitted under */
 };
@@ -139,6 +151,56 @@ static bool rect_covers(vp_rect a, vp_rect b)
 {
 	return b.y >= a.y && b.x >= a.x && b.y + b.h <= a.y + a.h &&
 	       b.x + b.w <= a.x + a.w;
+}
+
+/* The overlap of `a` and `b`, or a zero-area rect when they are disjoint. */
+static vp_rect rect_intersect(vp_rect a, vp_rect b)
+{
+	int y0 = a.y > b.y ? a.y : b.y;
+	int x0 = a.x > b.x ? a.x : b.x;
+	int y1 = a.y + a.h < b.y + b.h ? a.y + a.h : b.y + b.h;
+	int x1 = a.x + a.w < b.x + b.w ? a.x + a.w : b.x + b.w;
+	if (y1 <= y0 || x1 <= x0) {
+		return (vp_rect){ 0, 0, 0, 0 };
+	}
+	return (vp_rect){ y0, x0, y1 - y0, x1 - x0 };
+}
+
+/* The largest single rectangle inside `r` that does not touch `o`. Cutting a
+ * rect out of a rect leaves an L (up to four bands) and only one bitmap can
+ * ever be emitted, so the biggest band wins. `r` is already trimmed to the
+ * picture by gfx_clip, so area is the same thing as picture retained.
+ * Zero-area if `o` swallows `r`. */
+static vp_rect rect_trim_clear(vp_rect r, vp_rect o)
+{
+	vp_rect cand[4];
+	int n = 0;
+	if (o.x > r.x) {
+		cand[n++] = (vp_rect){ r.y, r.x, r.h, o.x - r.x };
+	}
+	if (o.x + o.w < r.x + r.w) {
+		cand[n++] = (vp_rect){ r.y, o.x + o.w, r.h,
+				       r.x + r.w - (o.x + o.w) };
+	}
+	if (o.y > r.y) {
+		cand[n++] = (vp_rect){ r.y, r.x, o.y - r.y, r.w };
+	}
+	if (o.y + o.h < r.y + r.h) {
+		cand[n++] = (vp_rect){ o.y + o.h, r.x, r.y + r.h - (o.y + o.h),
+				       r.w };
+	}
+	vp_rect best = { 0, 0, 0, 0 };
+	for (int i = 0; i < n; i++) {
+		if ((long)cand[i].h * cand[i].w > (long)best.h * best.w) {
+			best = cand[i];
+		}
+	}
+	return best;
+}
+
+static bool rect_same(vp_rect a, vp_rect b)
+{
+	return a.y == b.y && a.x == b.x && a.h == b.h && a.w == b.w;
 }
 
 static bool rect_contains(vp_rect r, int y, int x)
@@ -347,9 +409,7 @@ void comp_destroy(vp_comp *c)
 		if (c->gfx[i]->plane) {
 			ncplane_destroy(c->gfx[i]->plane);
 		}
-		if (c->gfx[i]->visual) {
-			ncvisual_destroy(c->gfx[i]->visual);
-		}
+		free(c->gfx[i]->rgba);
 		free(c->gfx[i]);
 	}
 	free(c->gfx);
@@ -413,7 +473,8 @@ void comp_set_root_painter(vp_comp *c, vp_paint_fn paint, void *user)
 /* Layers                                                                    */
 /* ------------------------------------------------------------------------- */
 
-static bool gfx_visible(vp_comp *c, vp_graphic *g, vp_rect *out);
+static bool gfx_visible(vp_comp *c, vp_graphic *g, int gi, vp_rect *abs_out,
+			vp_rect *local_out);
 static void damage_under(vp_comp *c, vp_rect r);
 
 static bool layer_within(const vp_layer *l, const vp_layer *ancestor)
@@ -427,21 +488,25 @@ static bool layer_within(const vp_layer *l, const vp_layer *ancestor)
 }
 
 /* Take down any bitmap under `l` that the pending change is about to make
- * undisplayable. Called with the model already updated but the planes still
- * where the terminal drew them - the only moment the pixels can be erased;
- * doing this after parking/hiding the plane would strand the picture. */
+ * undisplayable, or that it re-crops. Called with the model already updated but
+ * the planes still where the terminal drew them - the only moment the pixels
+ * can be erased; doing this after parking/hiding the plane would strand the
+ * picture. comp_graphics_sync puts the survivors back up later in the frame,
+ * before anything is presented. */
 static void gfx_withdraw_hidden(vp_comp *c, vp_layer *l)
 {
 	if (c->ngfx == 0) {
 		return; /* the common case: moving the pointer, a window, a tile */
 	}
+	comp_sort(c);
 	for (int i = 0; i < c->ngfx; i++) {
 		vp_graphic *g = c->gfx[i];
-		vp_rect r;
+		vp_rect r = { 0, 0, 0, 0 }, local = { 0, 0, 0, 0 };
 		if (!g->plane || !layer_within(g->owner, l)) {
 			continue;
 		}
-		if (gfx_visible(c, g, &r)) {
+		if (gfx_visible(c, g, i, &r, &local) &&
+		    rect_same(local, g->shown_local)) {
 			continue; /* it can simply ride the change */
 		}
 		ncplane_destroy(g->plane);
@@ -762,22 +827,79 @@ static void damage_under(vp_comp *c, vp_rect r)
 	}
 }
 
-vp_graphic *comp_graphic_add(vp_layer *owner, struct ncvisual *v, int local_y,
-			     int local_x, int cell_h, int cell_w)
+/* The cells of a bitmap holding something other than its padding. Bitmaps
+ * arrive far larger than their picture - lsix runs its montage out to the full
+ * terminal width and fills the rest with the terminal background - so the tight
+ * box of pixels differing from the top-left one is a good read on where the
+ * picture is. A bitmap with no uniform border (a photo, say) matches nothing
+ * and keeps its whole footprint, which is the safe answer.
+ *
+ * Only heavy padding counts. A uniform edge might be a border someone actually
+ * drew, and cropping that would show the window through where a solid colour
+ * belongs; a bitmap that is mostly picture is therefore left alone, and only
+ * the lopsided ones - where the padding dwarfs the picture, as with a montage
+ * run out to the terminal width - are trimmed back to it. */
+#define GFX_CONTENT_MAX_NUM 3 /* crop only below 3/4 of the footprint */
+#define GFX_CONTENT_MAX_DEN 4
+static vp_rect gfx_content_cells(const uint32_t *rgba, int px_h, int px_w,
+				 int cdimy, int cdimx, int cell_h, int cell_w)
 {
-	if (!owner || !v) {
+	vp_rect all = { 0, 0, cell_h, cell_w };
+	if (cdimy <= 0 || cdimx <= 0) {
+		return all;
+	}
+	uint32_t pad = rgba[0];
+	int y0 = px_h, y1 = -1, x0 = px_w, x1 = -1;
+	for (int y = 0; y < px_h; y++) {
+		const uint32_t *row = rgba + (size_t)y * px_w;
+		for (int x = 0; x < px_w; x++) {
+			if (row[x] == pad) {
+				continue;
+			}
+			if (y < y0) {
+				y0 = y;
+			}
+			if (y > y1) {
+				y1 = y;
+			}
+			if (x < x0) {
+				x0 = x;
+			}
+			if (x > x1) {
+				x1 = x;
+			}
+		}
+	}
+	if (y1 < 0) {
+		return all; /* uniform throughout: nothing to prefer */
+	}
+	vp_rect box = { y0 / cdimy, x0 / cdimx, y1 / cdimy - y0 / cdimy + 1,
+			x1 / cdimx - x0 / cdimx + 1 };
+	if ((long)box.h * box.w * GFX_CONTENT_MAX_DEN >=
+	    (long)all.h * all.w * GFX_CONTENT_MAX_NUM) {
+		return all; /* mostly picture: the edge is probably meant */
+	}
+	return box;
+}
+
+vp_graphic *comp_graphic_add(vp_layer *owner, uint32_t *rgba, int px_h,
+			     int px_w, int local_y, int local_x, int cell_h,
+			     int cell_w)
+{
+	if (!owner || !rgba || px_h <= 0 || px_w <= 0) {
+		free(rgba);
 		return NULL;
 	}
 	vp_comp *c = owner->comp;
 	if (!c->pixel_ok) {
-		ncvisual_destroy(v);
+		free(rgba);
 		return NULL;
 	}
 	if (c->ngfx == c->gfx_cap) {
 		int cap = c->gfx_cap ? c->gfx_cap * 2 : 8;
 		vp_graphic **ng = realloc(c->gfx, (size_t)cap * sizeof(*ng));
 		if (!ng) {
-			ncvisual_destroy(v);
+			free(rgba);
 			return NULL;
 		}
 		c->gfx = ng;
@@ -785,12 +907,19 @@ vp_graphic *comp_graphic_add(vp_layer *owner, struct ncvisual *v, int local_y,
 	}
 	vp_graphic *g = calloc(1, sizeof(*g));
 	if (!g) {
-		ncvisual_destroy(v);
+		free(rgba);
 		return NULL;
 	}
 	g->comp = c;
 	g->owner = owner;
-	g->visual = v;
+	g->rgba = rgba;
+	g->px_h = px_h;
+	g->px_w = px_w;
+	unsigned cdimy = 0, cdimx = 0;
+	ncplane_pixel_geom(owner->plane, NULL, NULL, &cdimy, &cdimx, NULL,
+			   NULL);
+	g->content = gfx_content_cells(rgba, px_h, px_w, (int)cdimy, (int)cdimx,
+				       cell_h, cell_w);
 	g->y = local_y;
 	g->x = local_x;
 	g->h = cell_h;
@@ -798,6 +927,14 @@ vp_graphic *comp_graphic_add(vp_layer *owner, struct ncvisual *v, int local_y,
 	c->gfx[c->ngfx++] = g;
 	c->gfx_dirty = true;
 	return g;
+}
+
+void comp_graphic_set_atomic(vp_graphic *g, bool atomic)
+{
+	if (g && g->atomic != atomic) {
+		g->atomic = atomic;
+		g->comp->gfx_dirty = true;
+	}
 }
 
 void comp_graphic_move(vp_graphic *g, int local_y, int local_x)
@@ -822,9 +959,7 @@ void comp_graphic_remove(vp_graphic *g)
 		damage_under(c, g->shown_abs);
 		comp_invalidate(c);
 	}
-	if (g->visual) {
-		ncvisual_destroy(g->visual);
-	}
+	free(g->rgba);
 	gfx_untrack(c, g);
 	free(g);
 	c->gfx_dirty = true;
@@ -843,54 +978,212 @@ void comp_graphics_clear(vp_layer *owner)
 	}
 }
 
-/* Is any opaque layer stacked above `owner` covering part of `r`? A pixel
- * bitmap cannot be blended with cells drawn over it, so an occluded bitmap must
- * not be on screen at all. */
-static bool gfx_occluded(vp_comp *c, vp_layer *owner, vp_rect r)
-{
-	for (int i = owner->sidx + 1; i < c->nsorted; i++) {
-		vp_layer *m = c->sorted[i];
-		if (!m->opaque || m->is_root || !layer_shown(m)) {
-			continue;
-		}
-		if (rect_overlap(comp_layer_abs(m), r)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-/* Decide whether a bitmap should currently be on screen, and where. */
-static bool gfx_visible(vp_comp *c, vp_graphic *g, vp_rect *out)
+/* What survives clipping a bitmap against its owner window and the physical
+ * screen, reported both in absolute coords (`abs_out`) and in owner-local cells
+ * (`local_out`, where the crop gets blitted).
+ *
+ * Glyphs stacked above are deliberately not considered here. A sprixel cell
+ * covered by a higher plane's glyph is wiped per-cell by notcurses' own
+ * renderer - the same mechanism that already lets the desktop wallpaper survive
+ * under a window - so that kind of occlusion needs no help from us. Clipping
+ * does: planes are not scissored to their parent, and the part of a bitmap
+ * hanging outside its window has nothing above it to do the wiping. */
+static bool gfx_clip(vp_comp *c, const vp_graphic *g, vp_rect *abs_out,
+		     vp_rect *local_out)
 {
 	vp_layer *o = g->owner;
 	if (!c->pixel_ok || !layer_shown(o)) {
 		return false;
 	}
-	/* Planes are not scissored to their parent, so a bitmap that does not
-	 * fit wholly inside its owner would spill over the window frame. */
-	if (g->y < 0 || g->x < 0 || g->y + g->h > o->rect.h ||
-	    g->x + g->w > o->rect.w) {
-		return false;
-	}
 	vp_rect oa = comp_layer_abs(o);
-	vp_rect r = { oa.y + g->y, oa.x + g->x, g->h, g->w };
-	/* Wholly on screen, and clear of the last physical row: a bitmap that
-	 * reaches it makes many terminals scroll the whole display. */
-	if (r.y < 0 || r.x < 0 || r.x + r.w > c->cols || r.y + r.h >= c->rows) {
+	/* Only the picture is ever put up, never the padding around it. That
+	 * keeps a bitmap's rect close to what it actually shows, so two padded
+	 * ones (lsix runs its montage out to the full terminal width) usually
+	 * turn out not to overlap at all, and when they do the trim has far
+	 * less to cut through. */
+	vp_rect r = rect_intersect((vp_rect){ oa.y + g->y + g->content.y,
+					      oa.x + g->x + g->content.x,
+					      g->content.h, g->content.w },
+				   oa);
+	/* Keep clear of the last physical row: a bitmap that reaches it makes
+	 * many terminals scroll the whole display. */
+	r = rect_intersect(r, (vp_rect){ 0, 0, c->rows - 1, c->cols });
+	if (r.h <= 0 || r.w <= 0) {
 		return false;
 	}
-	if (gfx_occluded(c, o, r)) {
+	*abs_out = r;
+	*local_out = (vp_rect){ r.y - oa.y, r.x - oa.x, r.h, r.w };
+	return true;
+}
+
+/* Whether a bitmap should be on screen at all, and where. Callers must have run
+ * comp_sort: depth comparisons read the sorted index.
+ *
+ * Terminals composite one bitmap per region and no more - Konsole renders
+ * overlapping sprixels as garbage, which is why the wallpaper has to be built
+ * as a single plane (see bg_fit_bitmap in wm.c). Glyphs over a bitmap are fine,
+ * notcurses wipes those cells; another bitmap is not. So a bitmap gives way to
+ * every bitmap above it, trimmed back to the largest area that still clears
+ * them. Trimming rather than hiding matters because a bitmap's rect is usually
+ * far larger than the picture inside it - lsix pads its montage out to nearly
+ * the full terminal width - so two that overlap on paper often have nothing
+ * visible in common, and the band that survives is the part you wanted.
+ *
+ * Only the clip is consulted for the bitmaps above, never their full
+ * visibility, so this cannot recurse; one that is itself trimmed away still
+ * pushes the ones below it, which is conservative but stable. */
+static bool gfx_visible(vp_comp *c, vp_graphic *g, int gi, vp_rect *abs_out,
+			vp_rect *local_out)
+{
+	vp_rect r, local;
+	if (!gfx_clip(c, g, &r, &local)) {
 		return false;
 	}
-	*out = r;
+	vp_rect ga = comp_layer_abs(g->owner);
+	for (int i = 0; i < c->ngfx; i++) {
+		const vp_graphic *o = c->gfx[i];
+		if (o == g || !layer_shown(o->owner)) {
+			continue;
+		}
+		/* Two bitmaps on one layer stack in the order comp_restack
+		 * applies them, which is their order in this very array. */
+		bool above = (o->owner == g->owner) ?
+				     i > gi :
+				     o->owner->sidx > g->owner->sidx;
+		vp_rect oabs, olocal;
+		if (!above || !gfx_clip(c, o, &oabs, &olocal) ||
+		    !rect_overlap(oabs, r)) {
+			continue;
+		}
+		if (g->atomic) {
+			return false; /* see comp_graphic_set_atomic */
+		}
+		r = rect_trim_clear(r, oabs);
+		if (r.h <= 0 || r.w <= 0) {
+			return false;
+		}
+	}
+	*abs_out = r;
+	*local_out = (vp_rect){ r.y - ga.y, r.x - ga.x, r.h, r.w };
+	return true;
+}
+
+/* A region of a bitmap's source pixels, in the terms ncvisual_options wants. */
+typedef struct gfx_crop {
+	unsigned begy, begx, leny, lenx;
+} gfx_crop;
+
+/* Which source pixels the owner-local rect `local` cuts out of `g`. The crop is
+ * cell-aligned throughout, so the sub-cell pxoff fields are never needed.
+ * False if it lands wholly past the end of the bitmap. */
+static bool gfx_source_crop(const vp_graphic *g, vp_rect local, int cdimy,
+			    int cdimx, gfx_crop *out)
+{
+	if (cdimy <= 0 || cdimx <= 0 || g->px_h <= 0 || g->px_w <= 0) {
+		return false;
+	}
+	/* Cells trimmed off the top/left of the footprint are the source origin. */
+	int beg_y = (local.y - g->y) * cdimy;
+	int beg_x = (local.x - g->x) * cdimx;
+	if (beg_y < 0 || beg_x < 0 || beg_y >= g->px_h || beg_x >= g->px_w) {
+		return false;
+	}
+	/* The footprint was rounded up to whole cells, so its last row and
+	 * column overhang the pixels; clamp rather than run off the end. */
+	int len_y = local.h * cdimy;
+	int len_x = local.w * cdimx;
+	if (len_y > g->px_h - beg_y) {
+		len_y = g->px_h - beg_y;
+	}
+	if (len_x > g->px_w - beg_x) {
+		len_x = g->px_w - beg_x;
+	}
+	if (len_y <= 0 || len_x <= 0) {
+		return false;
+	}
+	*out = (gfx_crop){ (unsigned)beg_y, (unsigned)beg_x, (unsigned)len_y,
+			   (unsigned)len_x };
+	return true;
+}
+
+/* Wrap the crop's pixels in a visual for one blit. ncvisual_options carries
+ * begy/begx/leny/lenx for exactly this, but only notcurses' sixel blitter
+ * honours the origin - the kitty one walks the buffer from its start, which
+ * silently slides a left- or top-cropped bitmap sideways instead of cutting it.
+ * So the crop is baked into the pixels and the source region left at the
+ * default. The caller destroys the result. */
+static struct ncvisual *gfx_crop_visual(const vp_graphic *g, gfx_crop crop)
+{
+	if (crop.begy == 0 && crop.begx == 0 && (int)crop.leny == g->px_h &&
+	    (int)crop.lenx == g->px_w) {
+		return ncvisual_from_rgba(g->rgba, g->px_h, g->px_w * 4,
+					  g->px_w);
+	}
+	uint32_t *buf = malloc((size_t)crop.leny * crop.lenx * sizeof(*buf));
+	if (!buf) {
+		return NULL;
+	}
+	for (unsigned row = 0; row < crop.leny; row++) {
+		memcpy(buf + (size_t)row * crop.lenx,
+		       g->rgba + (size_t)(crop.begy + row) * g->px_w +
+			       crop.begx,
+		       (size_t)crop.lenx * sizeof(*buf));
+	}
+	struct ncvisual *v = ncvisual_from_rgba(
+		buf, (int)crop.leny, (int)crop.lenx * 4, (int)crop.lenx);
+	free(buf);
+	return v;
+}
+
+/* Put the visible crop of `g` on screen as a single sprixel bound to its owner.
+ * One plane, never a mosaic of them: some kitty backends only reliably
+ * composite one sprixel per region (see bg_blit_tiled in wm.c). Returns true if
+ * a bitmap actually went up. */
+static bool gfx_blit(vp_comp *c, vp_graphic *g, vp_rect scr, vp_rect local)
+{
+	unsigned cdimy = 0, cdimx = 0;
+	ncplane_pixel_geom(g->owner->plane, NULL, NULL, &cdimy, &cdimx, NULL,
+			   NULL);
+	gfx_crop crop;
+	if (!gfx_source_crop(g, local, (int)cdimy, (int)cdimx, &crop)) {
+		return false;
+	}
+	struct ncvisual *v = gfx_crop_visual(g, crop);
+	if (!v) {
+		return false;
+	}
+
+	struct ncvisual_options o = {
+		.n = g->owner->plane,
+		.y = local.y,
+		.x = local.x,
+		.scaling = NCSCALE_NONE,
+		.blitter = NCBLIT_PIXEL,
+		.flags = NCVISUAL_OPTION_CHILDPLANE,
+	};
+	g->plane = ncvisual_blit(c->nc, v, &o);
+	/* The sprixel keeps its own encoded copy; the visual was scaffolding. */
+	ncvisual_destroy(v);
+	if (!g->plane) {
+		return false;
+	}
+	/* Binding governs geometry, not stacking: a freshly blitted plane lands
+	 * on top of the whole display until it is placed with its owner. */
+	ncplane_move_above(g->plane, g->owner->plane);
+	g->shown = true;
+	g->shown_y = g->y;
+	g->shown_x = g->x;
+	g->shown_local = local;
+	g->shown_abs = scr;
+	g->shown_order = c->order_rev;
+	damage_under(c, scr);
 	return true;
 }
 
 /* Bring the set of live bitmaps in line with what should be visible. Only the
- * graphics whose visibility, position or stacking actually moved are touched -
- * the whole point of computing occlusion instead of tearing every bitmap in
- * every window down on any scene change. */
+ * graphics whose crop, position or stacking actually moved are touched - the
+ * whole point of diffing at all is to avoid retransmitting every bitmap in
+ * every window on any scene change. */
 static bool comp_graphics_sync(vp_comp *c)
 {
 	if (c->ngfx == 0) {
@@ -901,18 +1194,19 @@ static bool comp_graphics_sync(vp_comp *c)
 	bool changed = false;
 	for (int i = 0; i < c->ngfx; i++) {
 		vp_graphic *g = c->gfx[i];
-		vp_rect r = { 0, 0, 0, 0 };
-		bool want = gfx_visible(c, g, &r);
+		vp_rect r = { 0, 0, 0, 0 }, local = { 0, 0, 0, 0 };
+		bool want = gfx_visible(c, g, i, &r, &local);
 
 		/* Nothing to do when it is up, still wanted, still anchored at
-		 * the same spot in its owner, and still at the same depth: the
-		 * plane is a child of the owner's, so it has already followed it
-		 * wherever it went. Only the *absolute* footprint needs
-		 * recording, for the damage bookkeeping. A change of depth does
-		 * force a redraw - notcurses' sprixel bookkeeping is
-		 * order-sensitive. */
+		 * the same spot in its owner, still cropped the same way, and
+		 * still at the same depth: the plane is a child of the owner's,
+		 * so it has already followed it wherever it went. Only the
+		 * *absolute* footprint needs recording, for the damage
+		 * bookkeeping. A change of depth does force a redraw -
+		 * notcurses' sprixel bookkeeping is order-sensitive. */
 		if (want && g->shown && g->y == g->shown_y &&
-		    g->x == g->shown_x && g->shown_order == c->order_rev) {
+		    g->x == g->shown_x && rect_same(local, g->shown_local) &&
+		    g->shown_order == c->order_rev) {
 			g->shown_abs = r;
 			continue;
 		}
@@ -928,30 +1222,8 @@ static bool comp_graphics_sync(vp_comp *c)
 			changed = true;
 		}
 
-		if (want) {
-			struct ncvisual_options o = {
-				.n = g->owner->plane,
-				.y = g->y,
-				.x = g->x,
-				.scaling = NCSCALE_NONE,
-				.blitter = NCBLIT_PIXEL,
-				.flags = NCVISUAL_OPTION_CHILDPLANE,
-			};
-			g->plane = ncvisual_blit(c->nc, g->visual, &o);
-			if (g->plane) {
-				/* Binding governs geometry, not stacking: a
-				 * freshly blitted plane lands on top of the
-				 * whole display until it is placed with its
-				 * owner. */
-				ncplane_move_above(g->plane, g->owner->plane);
-				g->shown = true;
-				g->shown_y = g->y;
-				g->shown_x = g->x;
-				g->shown_abs = r;
-				g->shown_order = c->order_rev;
-				damage_under(c, r);
-				changed = true;
-			}
+		if (want && gfx_blit(c, g, r, local)) {
+			changed = true;
 		}
 	}
 	return changed;
