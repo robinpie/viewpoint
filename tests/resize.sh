@@ -1,6 +1,6 @@
 # #!/usr/bin/env bash
 # # SPDX-License-Identifier: GPL-3.0-only
-# # Copyright (C) 2026  robinpie <robin413@protonmail.com>
+# # Copyright (C) 2026  robinpie <robin@dreamstation.systems>
 # #
 # #   viewpoint  the "geom" lines in its own debug log - what the WM intended
 # #   kernel     TIOCGWINSZ on the app's pty, read from outside via /proc

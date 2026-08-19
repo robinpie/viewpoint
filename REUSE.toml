@@ -17,5 +17,5 @@ path = [
     "tests/.gitignore",
 ]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "2026 robinpie <robin413@protonmail.com>"
+SPDX-FileCopyrightText = "2026 robinpie <robin@dreamstation.systems>"
 SPDX-License-Identifier = "GPL-3.0-only"

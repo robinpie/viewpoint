@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 /*
- * Copyright (C) 2026  robinpie <robin413@protonmail.com>
+ * Copyright (C) 2026  robinpie <robin@dreamstation.systems>
  */
 
 /* session.c - a tiny per-user daemon that owns PTYs across UI exits. */
