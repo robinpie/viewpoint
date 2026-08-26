@@ -236,8 +236,13 @@ bool taskbar_click(WM *wm, int y, int x)
 	for (int s = 0; s < g_nslots; s++) {
 		if (x >= g_slots[s].xstart && x < g_slots[s].xend) {
 			Window *win = wm->wins[g_slots[s].win_idx];
+			/* The slot toggles the window's visibility: a
+			 * minimized one comes back, the already-focused one
+			 * drops out of the way, anything else is raised. */
 			if (win->minimized) {
 				wm_restore(wm, win);
+			} else if (wm_focused(wm) == win) {
+				wm_minimize(wm, win);
 			} else {
 				wm_focus_window(wm, win);
 			}

@@ -68,7 +68,7 @@ These are the default keybinds. They are fully editable through an in-app settin
 | Drag a window border or corner                | Resize the window                        |
 | Scroll the wheel over a window                | Scroll its scrollback (forwarded to the app instead if it grabbed the mouse) |
 | Drag the title bar to a screen edge / corner  | Snap to half / quarter (outline preview shown; applied on release) |
-| Click a taskbar slot                          | Focus, or restore if minimized           |
+| Click a taskbar slot                          | Focus, restore if minimized, or minimize if already focused |
 | Horizontal scroll / click the `◄` `►` arrows  | Scroll the taskbar when more windows are open than fit |
 | Click the taskbar mode region                 | Toggle global mode                       |
 | Click a desktop icon                          | Perform the corresponding action         |
