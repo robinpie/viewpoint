@@ -504,13 +504,30 @@ typedef struct SessWin {
 } SessWin;
 
 static SessWin **g_wins;
-static int g_nwins, g_cap, g_next_id = 1, g_client = -1;
+static int g_nwins, g_cap, g_client = -1;
 
 static void server_drop_client(void)
 {
 	if (g_client >= 0) {
 		close(g_client);
 		g_client = -1;
+	}
+}
+
+/* Ids are handed out lowest-free-first. */
+static int server_alloc_id(void)
+{
+	for (int id = 1;; id++) {
+		bool taken = false;
+		for (int i = 0; i < g_nwins; i++) {
+			if (g_wins[i]->id == id) {
+				taken = true;
+				break;
+			}
+		}
+		if (!taken) {
+			return id;
+		}
 	}
 }
 
@@ -711,7 +728,7 @@ static SessWin *server_new_window(int rows, int cols, const char *cmd)
 	if (!w) {
 		return NULL;
 	}
-	w->id = g_next_id++;
+	w->id = server_alloc_id();
 	w->rows = rows;
 	w->cols = cols;
 	w->pty = -1;

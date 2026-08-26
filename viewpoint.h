@@ -480,7 +480,6 @@ typedef struct WM {
 	int nwins;
 	int cap;
 	int focused; /* index into wins, or -1 */
-	int next_id;
 
 	vp_mode mode;
 

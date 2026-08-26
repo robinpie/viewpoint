@@ -73,9 +73,6 @@ Window *window_create_attached(WM *wm, int id, int x, int y, int w, int h)
 		return NULL;
 	}
 	win->id = id;
-	if (wm->next_id <= id) {
-		wm->next_id = id + 1;
-	}
 	win->wm = wm; /* set early: vt_free in the error paths below needs it */
 	win->x = x;
 	win->y = y;
@@ -111,9 +108,26 @@ Window *window_create_attached(WM *wm, int id, int x, int y, int w, int h)
 	return win;
 }
 
+/* Lowest free id. */
+static int wm_alloc_id(WM *wm)
+{
+	for (int id = 1;; id++) {
+		bool taken = false;
+		for (int i = 0; i < wm->nwins; i++) {
+			if (wm->wins[i]->id == id) {
+				taken = true;
+				break;
+			}
+		}
+		if (!taken) {
+			return id;
+		}
+	}
+}
+
 Window *window_create(WM *wm, int x, int y, int w, int h)
 {
-	return window_create_attached(wm, wm->next_id++, x, y, w, h);
+	return window_create_attached(wm, wm_alloc_id(wm), x, y, w, h);
 }
 
 void window_destroy(WM *wm, Window *win)

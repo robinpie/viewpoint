@@ -35,7 +35,6 @@ void wm_init(WM *wm, struct notcurses *nc)
 	memset(wm, 0, sizeof(*wm));
 	wm->nc = nc;
 	wm->focused = -1;
-	wm->next_id = 1;
 	wm->mode = MODE_INTERPRET;
 
 	wm->comp = comp_create(nc);
