@@ -111,6 +111,8 @@ The `Terminal` tile adjusts per-window scrollback behavior:
 - `←`/`→` (or the mouse wheel) to adjust it — `Scrollback lines` (history retained per window; `0` disables it) and `Scroll step` (lines moved per wheel notch). Changes apply to open windows immediately.
 - `S` to save now, `Esc` (or click outside the panel) to return to the grid
 
+The `Animations` tile switches animated chrome on and off.
+
 If a setting you change is also governed by your manual config section, the status line warns you, but the manual section wins, so that change won't survive a restart.
 
 ### Configuration file
@@ -144,6 +146,10 @@ toggle = f12
 # Terminal behavior:
 scrollback  = 2000   # per-window scrollback lines (0 disables it)
 scroll_step = 3      # lines scrolled per mouse-wheel notch
+
+# Animations (default true): fade the resize size indicator out, rather than
+# dropping it the instant its hold expires.
+size_indicator_fade = true
 
 # Theme (presets: midnight, paper, forest, amber, mono):
 theme = forest

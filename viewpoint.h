@@ -249,6 +249,10 @@ typedef struct VpConfig {
 	int scrollback_max;
 	int scroll_step;
 
+	/* Animations (Animations settings). When false the resize size indicator
+	 * is dropped the instant its hold expires instead of fading out. */
+	bool sizeosd_fade;
+
 	/* Desktop launcher icon positions (top-left cell). -1 = unset, fall back
 	 * to the built-in placement. Set once the user drags an icon. */
 	int settings_icon_y, settings_icon_x;
@@ -299,6 +303,7 @@ typedef enum {
 	SETTING_COLORS,
 	SETTING_KEEP_CUSTOM,
 	SETTING_LAUNCHERS,
+	SETTING_SIZEOSD_FADE,
 } vp_setting;
 
 /* ------------------------------------------------------------------------- */
@@ -426,6 +431,7 @@ typedef enum {
 	SETTINGS_VIEW_TERMINAL, /* scrollback size / scroll step */
 	SETTINGS_VIEW_APPEARANCE, /* theme, desktop background, color overrides */
 	SETTINGS_VIEW_ICONS, /* custom desktop launcher icons */
+	SETTINGS_VIEW_ANIMATIONS, /* on/off switches for animated chrome */
 } settings_view;
 
 /* In-app settings. A modal panel opened from a desktop launcher icon; while open

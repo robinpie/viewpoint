@@ -24,6 +24,8 @@
  * The box holds at full strength, then fades - terminals give us no alpha, so
  * "fading" is the pen ramping toward the box's own background - and is hidden
  * the moment the ramp completes, so the emptied box is never left standing.
+ * The fade is optional (Settings -> Animations): with it off the box is dropped
+ * the instant the hold expires, which is the same path with a zero-length ramp.
  *
  * It centers on the window it describes, and sizeosd_tick re-places it every
  * pass, so it stays put over that window as the window is dragged around or
@@ -72,6 +74,15 @@ static uint64_t osd_age_ms(const WM *wm)
 	return now > wm->sizeosd_at_ms ? now - wm->sizeosd_at_ms : 0;
 }
 
+/* How long the fade may run. Zero when the user has turned it off in Settings →
+ * Animations, which makes the box's whole life the hold: the three places that
+ * care - the shade, the tick's expiry test and the loop's timeout - all read the
+ * length from here, so a zero-length fade needs no special case beyond this. */
+static uint64_t fade_len_ms(const WM *wm)
+{
+	return wm->config.sizeosd_fade ? (uint64_t)VP_SIZEOSD_FADE_MS : 0;
+}
+
 /* How far into the fade we are. Derived from the clock rather than counted in
  * ticks, so a repaint forced on us mid-fade (a bitmap torn down underneath)
  * lands on the shade the elapsed time calls for, not the next one in sequence. */
@@ -81,11 +92,12 @@ static unsigned fade_frac(const WM *wm)
 	if (age <= VP_SIZEOSD_HOLD_MS) {
 		return 0;
 	}
+	uint64_t len = fade_len_ms(wm);
 	age -= VP_SIZEOSD_HOLD_MS;
-	if (age >= VP_SIZEOSD_FADE_MS) {
+	if (len == 0 || age >= len) {
 		return FADE_RAMP;
 	}
-	return (unsigned)(age * FADE_RAMP / VP_SIZEOSD_FADE_MS);
+	return (unsigned)(age * FADE_RAMP / len);
 }
 
 /* `a` blended toward `b` by t/FADE_RAMP, per channel. */
@@ -231,7 +243,7 @@ void sizeosd_tick(WM *wm)
 		return;
 	}
 	uint64_t age = osd_age_ms(wm);
-	if (age >= (uint64_t)VP_SIZEOSD_HOLD_MS + VP_SIZEOSD_FADE_MS) {
+	if (age >= VP_SIZEOSD_HOLD_MS + fade_len_ms(wm)) {
 		sizeosd_hide(wm);
 		return;
 	}
@@ -256,7 +268,7 @@ int sizeosd_timeout_ms(const WM *wm)
 		/* Nothing to do until the hold runs out; sleep through it. */
 		return (int)(VP_SIZEOSD_HOLD_MS - age);
 	}
-	if (age < (uint64_t)VP_SIZEOSD_HOLD_MS + VP_SIZEOSD_FADE_MS) {
+	if (age < VP_SIZEOSD_HOLD_MS + fade_len_ms(wm)) {
 		return VP_SIZEOSD_STEP_MS;
 	}
 	return 0;

@@ -63,6 +63,7 @@ static const grid_entry g_grid_entries[] = {
 	{ "▤", "Terminal", SETTINGS_VIEW_TERMINAL },
 	{ "▦", "Appearance", SETTINGS_VIEW_APPEARANCE },
 	{ "▣", "Desktop Icons", SETTINGS_VIEW_ICONS },
+	{ "◐", "Animations", SETTINGS_VIEW_ANIMATIONS },
 };
 #define GRID_ENTRY_COUNT \
 	((int)(sizeof(g_grid_entries) / sizeof(g_grid_entries[0])))
@@ -97,6 +98,27 @@ static const term_row g_term_rows[] = {
 static int *term_field(WM *wm, int i)
 {
 	return (int *)((char *)&wm->config + g_term_rows[i].field_off);
+}
+
+/* ----- the Animations view's rows -----
+ * The same shape as term_row, for the on/off switches over animated chrome.
+ * A row is a bool in VpConfig plus the vp_setting it maps to; nothing here
+ * applies live, because the animations read their switch as they run. */
+typedef struct {
+	const char *label;
+	vp_setting setting; /* for config_manual_shadows_setting() */
+	size_t field_off; /* offsetof(VpConfig, <bool field>) */
+} anim_row;
+
+static const anim_row g_anim_rows[] = {
+	{ "Size indicator fade-out", SETTING_SIZEOSD_FADE,
+	  offsetof(VpConfig, sizeosd_fade) },
+};
+#define ANIM_ROWS ((int)(sizeof(g_anim_rows) / sizeof(g_anim_rows[0])))
+
+static bool *anim_field(WM *wm, int i)
+{
+	return (bool *)((char *)&wm->config + g_anim_rows[i].field_off);
 }
 
 /* What in-app text entry is currently building (Settings.edit_kind). */
@@ -169,6 +191,8 @@ static void panel_geom(const WM *wm, int *y, int *x, int *h, int *w)
 			rows = app_total_rows();
 		} else if (wm->settings.view == SETTINGS_VIEW_ICONS) {
 			rows = icons_total_rows(wm);
+		} else if (wm->settings.view == SETTINGS_VIEW_ANIMATIONS) {
+			rows = ANIM_ROWS;
 		}
 		H = rows + PANEL_CHROME;
 		if (H < PANEL_CHROME + 1)
@@ -292,7 +316,7 @@ static void scrollbar_thumb(int v, int n, int scroll, int *top, int *len)
 }
 
 /* Row count of the current view's scrolling list, or 0 for a view that has no
- * scrollbar (the grid, and Terminal - which is sized to always fit). */
+ * scrollbar (the grid, and Terminal/Animations - both sized to always fit). */
 static int list_len(const WM *wm)
 {
 	if (wm->settings.view == SETTINGS_VIEW_KEYBINDINGS) {
@@ -873,6 +897,11 @@ static void settings_set_view(WM *wm, settings_view v)
 		s->scroll = 0;
 		snprintf(s->status, sizeof(s->status),
 			 "A: add   Enter: command   R: rename   D: delete");
+	} else if (v == SETTINGS_VIEW_ANIMATIONS) {
+		s->sel = 0;
+		s->scroll = 0;
+		snprintf(s->status, sizeof(s->status),
+			 "←/→: toggle   S: save   Esc: back");
 	} else {
 		snprintf(s->status, sizeof(s->status),
 			 "↑/↓/←/→: select   Enter: open   Esc: close");
@@ -1022,6 +1051,30 @@ static void term_adjust(WM *wm, int row, int dir)
 	settings_damage(s);
 }
 
+/* Flip the Animations-view switch on `row` and report - warning, as the Terminal
+ * view does, when the manual config section will reassert it on restart. */
+static void anim_toggle(WM *wm, int row)
+{
+	if (row < 0 || row >= ANIM_ROWS) {
+		return;
+	}
+	const anim_row *ar = &g_anim_rows[row];
+	Settings *s = &wm->settings;
+	bool *field = anim_field(wm, row);
+
+	*field = !*field;
+
+	if (config_manual_shadows_setting(&wm->config, ar->setting)) {
+		snprintf(s->status, sizeof(s->status),
+			 "%s - your manual config overrides it on restart",
+			 ar->label);
+	} else {
+		snprintf(s->status, sizeof(s->status), "%s = %s", ar->label,
+			 *field ? "on" : "off");
+	}
+	settings_damage(s);
+}
+
 static void grid_move(WM *wm, int drow, int dcol)
 {
 	Settings *s = &wm->settings;
@@ -1097,6 +1150,48 @@ static void settings_terminal_key(WM *wm, const ncinput *ni)
 	case '+':
 	case '=':
 		term_adjust(wm, s->sel, +1);
+		break;
+	case 's':
+	case 'S':
+		snprintf(s->status, sizeof(s->status),
+			 config_save(&wm->config) ?
+				 "Saved" :
+				 "Save failed (see VP_DEBUG)");
+		settings_damage(s);
+		break;
+	case NCKEY_ESC:
+	case 'q':
+	case 'Q':
+		settings_back(wm);
+		break;
+	default:
+		break;
+	}
+}
+
+static void settings_animations_key(WM *wm, const ncinput *ni)
+{
+	Settings *s = &wm->settings;
+	switch (ni->id) {
+	case NCKEY_UP:
+		if (s->sel > 0) {
+			s->sel--;
+			settings_damage(s);
+		}
+		break;
+	case NCKEY_DOWN:
+		if (s->sel < ANIM_ROWS - 1) {
+			s->sel++;
+			settings_damage(s);
+		}
+		break;
+	/* A switch has nowhere to go but the other way, so every "change it"
+	 * key lands on the same flip. */
+	case NCKEY_LEFT:
+	case NCKEY_RIGHT:
+	case NCKEY_ENTER:
+	case ' ':
+		anim_toggle(wm, s->sel);
 		break;
 	case 's':
 	case 'S':
@@ -1666,6 +1761,10 @@ void settings_handle_key(WM *wm, const ncinput *ni)
 		settings_icons_key(wm, ni);
 		return;
 	}
+	if (s->view == SETTINGS_VIEW_ANIMATIONS) {
+		settings_animations_key(wm, ni);
+		return;
+	}
 
 	if (s->capturing) {
 		if (ni->id == NCKEY_ESC) {
@@ -1809,6 +1908,15 @@ void settings_click(WM *wm, int btn, int y, int x)
 		return;
 	}
 
+	if (s->view == SETTINGS_VIEW_ANIMATIONS) {
+		int listrow = rely - 1; /* row 0 is the top border */
+		if (listrow >= 0 && listrow < ANIM_ROWS) {
+			s->sel = listrow;
+			settings_damage(s);
+		}
+		return;
+	}
+
 	if (s->view == SETTINGS_VIEW_APPEARANCE) {
 		if (s->editing) {
 			return; /* ignore clicks while typing */
@@ -1918,6 +2026,10 @@ void settings_scroll(WM *wm, int dir)
 	if (s->view == SETTINGS_VIEW_TERMINAL) {
 		term_adjust(wm, s->sel,
 			    dir < 0 ? +1 : -1); /* wheel up raises the value */
+		return;
+	}
+	if (s->view == SETTINGS_VIEW_ANIMATIONS) {
+		anim_toggle(wm, s->sel);
 		return;
 	}
 	if (s->view == SETTINGS_VIEW_ICONS) {
@@ -2208,6 +2320,32 @@ static void draw_terminal(WM *wm, struct ncplane *p, int W, int H)
 	ncplane_putstr_yx(p, H - 2, 2, hbuf);
 }
 
+/* ----- the Animations view ------------------------------------------------ */
+
+static void draw_animations(WM *wm, struct ncplane *p, int W, int H)
+{
+	Settings *s = &wm->settings;
+	ncplane_erase(p);
+	draw_border(wm, p, W, H, " Animations ");
+
+	for (int i = 0; i < ANIM_ROWS; i++) {
+		draw_row(wm, p, 1 + i, W, g_anim_rows[i].label,
+			 *anim_field(wm, i) ? "on" : "off", i == s->sel, false);
+	}
+
+	vp_setbg(p, wm->theme.panel_bg);
+	vp_setfg(p, wm->theme.panel_status);
+	char sbuf[128];
+	snprintf(sbuf, sizeof(sbuf), "%-*.*s", W - 4, W - 4, s->status);
+	ncplane_putstr_yx(p, H - 3, 2, sbuf);
+
+	vp_setfg(p, wm->theme.panel_hint);
+	char hbuf[128];
+	snprintf(hbuf, sizeof(hbuf), "%-*.*s", W - 4, W - 4,
+		 "↑/↓ select · ←/→ toggle · S save · Esc back");
+	ncplane_putstr_yx(p, H - 2, 2, hbuf);
+}
+
 /* ----- the Appearance view ----------------------------------------------- */
 
 /* Fill label/value for Appearance row `row`. */
@@ -2439,6 +2577,8 @@ static void panel_paint(struct ncplane *p, bool full, void *user)
 		draw_appearance(wm, p, W, H);
 	} else if (s->view == SETTINGS_VIEW_ICONS) {
 		draw_icons(wm, p, W, H);
+	} else if (s->view == SETTINGS_VIEW_ANIMATIONS) {
+		draw_animations(wm, p, W, H);
 	} else {
 		draw_keybindings(wm, p, W, H);
 	}

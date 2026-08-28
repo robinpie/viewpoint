@@ -236,6 +236,24 @@ static void launchers_free(VpConfig *cfg)
 
 /* Apply one parsed key/value pair to cfg. Returns false for unknown keys or
  * malformed values. line is supplied only for diagnostics. */
+/* A boolean config value, in the spellings the file has always accepted. False
+ * with *out untouched when it is none of them, so the caller can complain in
+ * the terms of its own key. */
+static bool parse_bool(const char *val, bool *out)
+{
+	if (strcmp(val, "true") == 0 || strcmp(val, "1") == 0 ||
+	    strcmp(val, "yes") == 0) {
+		*out = true;
+		return true;
+	}
+	if (strcmp(val, "false") == 0 || strcmp(val, "0") == 0 ||
+	    strcmp(val, "no") == 0) {
+		*out = false;
+		return true;
+	}
+	return false;
+}
+
 static bool config_apply(VpConfig *cfg, const char *key, char *val, int line)
 {
 	if (strcmp(key, "bind") == 0) {
@@ -281,6 +299,14 @@ static bool config_apply(VpConfig *cfg, const char *key, char *val, int line)
 			return false;
 		}
 		cfg->scroll_step = (int)n;
+		return true;
+	}
+	if (strcmp(key, "size_indicator_fade") == 0) {
+		if (!parse_bool(val, &cfg->sizeosd_fade)) {
+			vp_log("config: line %d: size_indicator_fade needs true/false\n",
+			       line);
+			return false;
+		}
 		return true;
 	}
 	if (strcmp(key, "icon") == 0) {
@@ -410,13 +436,7 @@ static bool config_apply(VpConfig *cfg, const char *key, char *val, int line)
 		return true;
 	}
 	if (strcmp(key, "keep_customizations") == 0) {
-		if (strcmp(val, "true") == 0 || strcmp(val, "1") == 0 ||
-		    strcmp(val, "yes") == 0) {
-			cfg->keep_customizations = true;
-		} else if (strcmp(val, "false") == 0 || strcmp(val, "0") == 0 ||
-			   strcmp(val, "no") == 0) {
-			cfg->keep_customizations = false;
-		} else {
+		if (!parse_bool(val, &cfg->keep_customizations)) {
 			vp_log("config: line %d: keep_customizations needs true/false\n",
 			       line);
 			return false;
@@ -522,6 +542,7 @@ void config_defaults(VpConfig *cfg)
 	cfg->die_icon_y = cfg->die_icon_x = -1;
 	cfg->scrollback_max = VP_SCROLLBACK_MAX;
 	cfg->scroll_step = VP_SCROLL_STEP;
+	cfg->sizeosd_fade = true;
 	cfg->theme_name = NULL;
 	cfg->bg_mode = -1;
 	cfg->bg_fit = FIT_STRETCH;
@@ -604,6 +625,12 @@ static void write_inapp_diff(FILE *f, const VpConfig *cfg, const VpConfig *base)
 	}
 	if (cfg->scroll_step != base->scroll_step) {
 		fprintf(f, "scroll_step = %d\n", cfg->scroll_step);
+	}
+
+	/* Animation switches, same rule: only when they differ from the baseline. */
+	if (cfg->sizeosd_fade != base->sizeosd_fade) {
+		fprintf(f, "size_indicator_fade = %s\n",
+			cfg->sizeosd_fade ? "true" : "false");
 	}
 
 	/* Desktop icon positions, only when set and differing from the baseline (so
@@ -787,6 +814,8 @@ static bool setting_differs(const VpConfig *a, const VpConfig *b, vp_setting s)
 	}
 	case SETTING_KEEP_CUSTOM:
 		return a->keep_customizations != b->keep_customizations;
+	case SETTING_SIZEOSD_FADE:
+		return a->sizeosd_fade != b->sizeosd_fade;
 	case SETTING_LAUNCHERS: {
 		if (a->nlaunchers != b->nlaunchers) {
 			return true;
@@ -922,6 +951,7 @@ void config_manual_override(VpConfig *cfg, vp_setting setting)
 	case SETTING_TOGGLE_KEY:
 	case SETTING_SCROLLBACK:
 	case SETTING_SCROLL_STEP:
+	case SETTING_SIZEOSD_FADE:
 	case SETTING_COLORS:
 		break; /* not handled here (colors are per-element below) */
 	}
