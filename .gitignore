@@ -3,3 +3,8 @@ viewpoint
 CLAUDE.md
 a.out
 developmentInfo.md
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/

@@ -1,6 +1,6 @@
 version = 1
 
-# Source files (*.c, *.h) carry their own SPDX headers.
+# Source files (*.c, *.h, *.py) carry their own SPDX headers.
 # The .clang-format file is borrowed from the Linux kernel and is GPL-2.0-only;
 # it carries its own header. Everything else is covered below.
 
@@ -15,6 +15,8 @@ path = [
     "tests/README.md",
     "tests/Makefile",
     "tests/.gitignore",
+    "tests/unit/Makefile",
+    "tests/unit/.gitignore",
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 robinpie <robin@dreamstation.systems>"
