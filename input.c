@@ -71,6 +71,8 @@ static const keychord g_default_keymap[] = {
 	{ NCKEY_DOWN, AS, ACT_RESIZE_D },
 	{ NCKEY_PGUP, S, ACT_SCROLL_UP },
 	{ NCKEY_PGDOWN, S, ACT_SCROLL_DOWN },
+	{ 'c', A, ACT_COPY },
+	{ 'v', A, ACT_PASTE },
 	{ '1', A, ACT_SLOT_1 },
 	{ '2', A, ACT_SLOT_2 },
 	{ '3', A, ACT_SLOT_3 },
@@ -112,6 +114,8 @@ static const struct {
 	{ "resize_down", "Resize window down", ACT_RESIZE_D },
 	{ "scroll_up", "Scroll back (history)", ACT_SCROLL_UP },
 	{ "scroll_down", "Scroll forward", ACT_SCROLL_DOWN },
+	{ "copy", "Copy selection", ACT_COPY },
+	{ "paste", "Paste clipboard", ACT_PASTE },
 	{ "slot1", "Focus taskbar slot 1", ACT_SLOT_1 },
 	{ "slot2", "Focus taskbar slot 2", ACT_SLOT_2 },
 	{ "slot3", "Focus taskbar slot 3", ACT_SLOT_3 },
@@ -439,14 +443,9 @@ bool keymap_chord_for_action(const VpConfig *cfg, vp_action act, char *buf,
 
 /* Translate a live keypress into a chord, rejecting bare modifier/lock keys and
  * mouse events. */
-bool keymap_chord_from_input(const ncinput *ni, uint32_t *id_out,
-			     unsigned *mods_out)
+bool input_key_is_modifier(const ncinput *ni)
 {
-	uint32_t id = ni->id;
-	if (id == 0 || nckey_mouse_p(id)) {
-		return false;
-	}
-	switch (id) {
+	switch (ni->id) {
 	case NCKEY_LSHIFT:
 	case NCKEY_RSHIFT:
 	case NCKEY_LCTRL:
@@ -462,9 +461,21 @@ bool keymap_chord_from_input(const ncinput *ni, uint32_t *id_out,
 	case NCKEY_CAPS_LOCK:
 	case NCKEY_NUM_LOCK:
 	case NCKEY_SCROLL_LOCK:
-		return false;
+		return true;
 	default:
-		break;
+		return false;
+	}
+}
+
+bool keymap_chord_from_input(const ncinput *ni, uint32_t *id_out,
+			     unsigned *mods_out)
+{
+	uint32_t id = ni->id;
+	if (id == 0 || nckey_mouse_p(id)) {
+		return false;
+	}
+	if (input_key_is_modifier(ni)) {
+		return false;
 	}
 	if (id < 0x80 && isalpha((int)id)) {
 		id = (uint32_t)tolower((int)id);
@@ -588,6 +599,12 @@ static void do_action(WM *wm, vp_action act)
 		}
 		break;
 	}
+	case ACT_COPY:
+		sel_copy(wm, wm_focused(wm));
+		break;
+	case ACT_PASTE:
+		clipboard_paste(wm, wm_focused(wm));
+		break;
 	case ACT_SLOT_1:
 	case ACT_SLOT_2:
 	case ACT_SLOT_3:
@@ -858,6 +875,18 @@ static void snap_show(WM *wm, vp_snapzone z)
 	wm->snap_preview = z;
 }
 
+/* True if absolute cell (y,x) is inside the window's content grid (i.e. on the
+ * text, not on the border or title bar). */
+static bool in_content(const Window *win, int y, int x)
+{
+	if (!win) {
+		return false;
+	}
+	int crow = y - (win->y + VP_BORDER);
+	int ccol = x - (win->x + VP_BORDER);
+	return crow >= 0 && ccol >= 0 && crow < win->rows && ccol < win->cols;
+}
+
 static void content_forward(Window *win, mev_type t, int btn, int y, int x,
 			    unsigned mods)
 {
@@ -1003,6 +1032,27 @@ static void update_drag(WM *wm, int y, int x)
 		return;
 	}
 
+	if (wm->drag == DRAG_SELECT) {
+		int crow = y - (win->y + VP_BORDER);
+		int ccol = x - (win->x + VP_BORDER);
+		/* Dragging past the top or bottom edge pulls history through the
+		 * window a line at a time, so a selection can run off-screen. */
+		if (crow < 0) {
+			vt_scroll(win, +1);
+			crow = 0;
+		} else if (crow >= win->rows) {
+			vt_scroll(win, -1);
+			crow = win->rows - 1;
+		}
+		if (ccol < 0) {
+			ccol = 0;
+		} else if (ccol >= win->cols) {
+			ccol = win->cols - 1;
+		}
+		sel_extend(win, crow, ccol);
+		return;
+	}
+
 	if (wm->drag == DRAG_CONTENT) {
 		content_forward(win, MEV_MOTION, 1, y, x, 0);
 		return;
@@ -1012,8 +1062,17 @@ static void update_drag(WM *wm, int y, int x)
 static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
 {
 	if (btn != 1) {
-		content_forward(wm_window_at(wm, y, x), MEV_PRESS, btn, y, x,
-				mods);
+		Window *hover = wm_window_at(wm, y, x);
+		/* Middle-click pastes the register, X11-style - unless the app under
+		 * the pointer grabbed the mouse, in which case the click is its.
+		 * It focuses the window first: pasted text is keystrokes, and typing
+		 * into a window the keyboard isn't pointed at would be a trap. */
+		if (btn == 2 && in_content(hover, y, x) && !hover->app_mouse) {
+			wm_focus_window(wm, hover);
+			clipboard_paste(wm, hover);
+			return;
+		}
+		content_forward(hover, MEV_PRESS, btn, y, x, mods);
 		return;
 	}
 	if (taskbar_click(wm, y, x)) {
@@ -1118,6 +1177,35 @@ static void mouse_press(WM *wm, int btn, int y, int x, unsigned mods)
 		return;
 	}
 
+	/* On the text. The drag is ours (a selection) unless the app asked for the
+	 * mouse - and Shift takes it back even then, the same override every other
+	 * terminal uses. */
+	int crow = rely - VP_BORDER;
+	int ccol = relx - VP_BORDER;
+	if (!win->app_mouse || (mods & NCKEY_MOD_SHIFT)) {
+		/* Click count picks the granularity: char, word, then line. */
+		uint64_t t = now_ns();
+		bool repeat = wm->last_selclick_win == win->id &&
+			      wm->last_selclick_row == crow &&
+			      wm->last_selclick_col == ccol &&
+			      t - wm->last_selclick_ns <=
+				      (uint64_t)VP_DBLCLICK_MS * 1000000ull;
+		wm->selclick_count = repeat ? wm->selclick_count % 3 + 1 : 1;
+		wm->last_selclick_ns = t;
+		wm->last_selclick_win = win->id;
+		wm->last_selclick_row = crow;
+		wm->last_selclick_col = ccol;
+
+		vp_selmode mode = wm->selclick_count == 2 ? SEL_WORD :
+				  wm->selclick_count == 3 ? SEL_LINE :
+							    SEL_CHAR;
+		sel_start(wm, win, crow, ccol, mode);
+		wm->drag = DRAG_SELECT;
+		wm->drag_win = win->id;
+		return;
+	}
+
+	sel_clear(win); /* the app owns this drag; drop any stale highlight */
 	wm->drag = DRAG_CONTENT;
 	wm->drag_win = win->id;
 	content_forward(win, MEV_PRESS, btn, y, x, mods);
@@ -1207,6 +1295,12 @@ static void mouse_release(WM *wm, int btn, int y, int x, unsigned mods)
 	} else if (wm->drag == DRAG_CONTENT) {
 		content_forward(find_by_id(wm, wm->drag_win), MEV_RELEASE, btn,
 				y, x, mods);
+	} else if (wm->drag == DRAG_SELECT) {
+		/* Take the release position (terminals that report only press and
+		 * release still get the full span). The selection stays put until
+		 * the copy chord asks for it - releasing the button finishes the
+		 * gesture, it doesn't spend the clipboard. */
+		update_drag(wm, y, x);
 	}
 	snap_hide(wm);
 	wm->drag = DRAG_NONE;

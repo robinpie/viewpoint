@@ -24,6 +24,7 @@
  *     unbind = alt+f4             # drop a default chord
  *     toggle = f12                # the INTERPRET/PASSTHROUGH key
  *     scrollback  = 2000          # per-window history lines
+ *     clipboard_command = wl-copy # a copy also pipes the text into this
  *     launcher = -1 -1 Logs | journalctl -f   # a desktop icon (-1 -1 = unplaced)
  *
  * Recognized keys are dispatched in config_apply(). Chord/action name parsing
@@ -301,6 +302,13 @@ static bool config_apply(VpConfig *cfg, const char *key, char *val, int line)
 		cfg->scroll_step = (int)n;
 		return true;
 	}
+	if (strcmp(key, "clipboard_command") == 0) {
+		/* A shell command a copy pipes the selected text into. Empty
+		 * clears it; the internal register and OSC 52 are unaffected. */
+		free(cfg->clipboard_cmd);
+		cfg->clipboard_cmd = *val ? strdup(val) : NULL;
+		return true;
+	}
 	if (strcmp(key, "size_indicator_fade") == 0) {
 		if (!parse_bool(val, &cfg->sizeosd_fade)) {
 			vp_log("config: line %d: size_indicator_fade needs true/false\n",
@@ -543,6 +551,7 @@ void config_defaults(VpConfig *cfg)
 	cfg->scrollback_max = VP_SCROLLBACK_MAX;
 	cfg->scroll_step = VP_SCROLL_STEP;
 	cfg->sizeosd_fade = true;
+	cfg->clipboard_cmd = NULL;
 	cfg->theme_name = NULL;
 	cfg->bg_mode = -1;
 	cfg->bg_fit = FIT_STRETCH;
@@ -564,6 +573,8 @@ void config_free(VpConfig *cfg)
 	cfg->keycap = 0;
 	free(cfg->manual_text);
 	cfg->manual_text = NULL;
+	free(cfg->clipboard_cmd);
+	cfg->clipboard_cmd = NULL;
 	free(cfg->theme_name);
 	cfg->theme_name = NULL;
 	free(cfg->bg_glyph);
@@ -625,6 +636,11 @@ static void write_inapp_diff(FILE *f, const VpConfig *cfg, const VpConfig *base)
 	}
 	if (cfg->scroll_step != base->scroll_step) {
 		fprintf(f, "scroll_step = %d\n", cfg->scroll_step);
+	}
+
+	if (setting_differs(cfg, base, SETTING_CLIPBOARD_CMD)) {
+		fprintf(f, "clipboard_command = %s\n",
+			cfg->clipboard_cmd ? cfg->clipboard_cmd : "");
 	}
 
 	/* Animation switches, same rule: only when they differ from the baseline. */
@@ -816,6 +832,13 @@ static bool setting_differs(const VpConfig *a, const VpConfig *b, vp_setting s)
 		return a->keep_customizations != b->keep_customizations;
 	case SETTING_SIZEOSD_FADE:
 		return a->sizeosd_fade != b->sizeosd_fade;
+	case SETTING_CLIPBOARD_CMD: {
+		bool ac = a->clipboard_cmd != NULL,
+		     bc = b->clipboard_cmd != NULL;
+		return ac != bc ||
+		       (ac && bc &&
+			strcmp(a->clipboard_cmd, b->clipboard_cmd) != 0);
+	}
 	case SETTING_LAUNCHERS: {
 		if (a->nlaunchers != b->nlaunchers) {
 			return true;
@@ -952,6 +975,7 @@ void config_manual_override(VpConfig *cfg, vp_setting setting)
 	case SETTING_SCROLLBACK:
 	case SETTING_SCROLL_STEP:
 	case SETTING_SIZEOSD_FADE:
+	case SETTING_CLIPBOARD_CMD:
 	case SETTING_COLORS:
 		break; /* not handled here (colors are per-element below) */
 	}

@@ -95,6 +95,15 @@ static const term_row g_term_rows[] = {
 };
 #define TERM_ROWS ((int)(sizeof(g_term_rows) / sizeof(g_term_rows[0])))
 
+/* The Terminal view's one non-numeric row: the shell command a copy pipes the
+ * selection into. It sits below the adjustable rows and is typed, not nudged,
+ * so everything that walks the view counts rows with term_total_rows(). */
+#define TERM_ROW_CLIPBOARD TERM_ROWS
+static int term_total_rows(void)
+{
+	return TERM_ROWS + 1;
+}
+
 static int *term_field(WM *wm, int i)
 {
 	return (int *)((char *)&wm->config + g_term_rows[i].field_off);
@@ -127,6 +136,7 @@ enum {
 	EDIT_COLOR, /* a color override, naming edit_color_idx */
 	EDIT_ICON_LABEL, /* a launcher's caption, naming edit_launcher */
 	EDIT_ICON_CMD, /* a launcher's command */
+	EDIT_CLIPBOARD_CMD, /* the Terminal view's clipboard helper command */
 };
 
 static void clamp_icon_pos(const WM *wm, int h, int w, int *y, int *x)
@@ -186,7 +196,7 @@ static void panel_geom(const WM *wm, int *y, int *x, int *h, int *w)
 			W = 24;
 		int rows = total_rows();
 		if (wm->settings.view == SETTINGS_VIEW_TERMINAL) {
-			rows = TERM_ROWS;
+			rows = term_total_rows();
 		} else if (wm->settings.view == SETTINGS_VIEW_APPEARANCE) {
 			rows = app_total_rows();
 		} else if (wm->settings.view == SETTINGS_VIEW_ICONS) {
@@ -886,7 +896,7 @@ static void settings_set_view(WM *wm, settings_view v)
 		s->sel = 0;
 		s->scroll = 0;
 		snprintf(s->status, sizeof(s->status),
-			 "←/→: adjust   S: save   Esc: back");
+			 "←/→: adjust   Enter: edit   S: save   Esc: back");
 	} else if (v == SETTINGS_VIEW_APPEARANCE) {
 		s->sel = 0;
 		s->scroll = 0;
@@ -1125,9 +1135,19 @@ static void settings_grid_key(WM *wm, const ncinput *ni)
 	}
 }
 
+/* The clipboard-command row is typed rather than nudged, so it needs the text
+ * entry machinery further down the file. */
+static void term_edit_start(WM *wm);
+static void term_edit_key(WM *wm, const ncinput *ni);
+static void term_clipboard_clear(WM *wm);
+
 static void settings_terminal_key(WM *wm, const ncinput *ni)
 {
 	Settings *s = &wm->settings;
+	if (s->editing) {
+		term_edit_key(wm, ni);
+		return;
+	}
 	switch (ni->id) {
 	case NCKEY_UP:
 		if (s->sel > 0) {
@@ -1136,7 +1156,7 @@ static void settings_terminal_key(WM *wm, const ncinput *ni)
 		}
 		break;
 	case NCKEY_DOWN:
-		if (s->sel < TERM_ROWS - 1) {
+		if (s->sel < term_total_rows() - 1) {
 			s->sel++;
 			settings_damage(s);
 		}
@@ -1150,6 +1170,20 @@ static void settings_terminal_key(WM *wm, const ncinput *ni)
 	case '+':
 	case '=':
 		term_adjust(wm, s->sel, +1);
+		break;
+	case NCKEY_ENTER:
+	case ' ':
+		if (s->sel == TERM_ROW_CLIPBOARD) {
+			term_edit_start(wm);
+		}
+		break;
+	case 'd':
+	case 'D':
+	case NCKEY_DEL:
+	case NCKEY_BACKSPACE:
+		if (s->sel == TERM_ROW_CLIPBOARD) {
+			term_clipboard_clear(wm);
+		}
 		break;
 	case 's':
 	case 'S':
@@ -1396,6 +1430,75 @@ static void appearance_edit_key(WM *wm, const ncinput *ni)
 	}
 	if (ni->id == NCKEY_ENTER) {
 		appearance_edit_commit(wm);
+		return;
+	}
+	if (ni->id == NCKEY_BACKSPACE) {
+		if (s->input_len > 0) {
+			s->input[--s->input_len] = '\0';
+			settings_damage(s);
+		}
+		return;
+	}
+	if (ni->id >= 0x20 && ni->id < 0x7f &&
+	    s->input_len < (int)sizeof(s->input) - 1) {
+		s->input[s->input_len++] = (char)ni->id;
+		s->input[s->input_len] = '\0';
+		settings_damage(s);
+	}
+}
+
+/* ----- the Terminal view's clipboard-command row -------------------------- */
+
+/* Say what the row is set to, warning when the manual config section will
+ * reassert its own value on the next load (as term_adjust does for the
+ * numeric rows). */
+static void term_clipboard_report(WM *wm, const char *done)
+{
+	Settings *s = &wm->settings;
+	if (config_manual_shadows_setting(&wm->config, SETTING_CLIPBOARD_CMD)) {
+		snprintf(s->status, sizeof(s->status),
+			 "%s - your manual config overrides it on restart",
+			 done);
+	} else {
+		snprintf(s->status, sizeof(s->status), "%s", done);
+	}
+	settings_damage(s);
+}
+
+static void term_edit_start(WM *wm)
+{
+	edit_start(wm, EDIT_CLIPBOARD_CMD, wm->config.clipboard_cmd,
+		   "Type a shell command · Enter: apply · Esc: cancel");
+}
+
+static void term_clipboard_clear(WM *wm)
+{
+	free(wm->config.clipboard_cmd);
+	wm->config.clipboard_cmd = NULL;
+	term_clipboard_report(wm, "Clipboard command cleared");
+}
+
+static void term_edit_commit(WM *wm)
+{
+	Settings *s = &wm->settings;
+	s->editing = false;
+	free(wm->config.clipboard_cmd);
+	wm->config.clipboard_cmd = s->input[0] ? strdup(s->input) : NULL;
+	term_clipboard_report(wm, s->input[0] ? "Clipboard command set" :
+						"Clipboard command cleared");
+}
+
+static void term_edit_key(WM *wm, const ncinput *ni)
+{
+	Settings *s = &wm->settings;
+	if (ni->id == NCKEY_ESC) {
+		s->editing = false;
+		snprintf(s->status, sizeof(s->status), "Edit cancelled");
+		settings_damage(s);
+		return;
+	}
+	if (ni->id == NCKEY_ENTER) {
+		term_edit_commit(wm);
 		return;
 	}
 	if (ni->id == NCKEY_BACKSPACE) {
@@ -1900,10 +2003,21 @@ void settings_click(WM *wm, int btn, int y, int x)
 	}
 
 	if (s->view == SETTINGS_VIEW_TERMINAL) {
+		if (s->editing) {
+			return; /* ignore clicks while typing */
+		}
 		int listrow = rely - 1; /* row 0 is the top border */
-		if (listrow >= 0 && listrow < TERM_ROWS) {
+		if (listrow >= 0 && listrow < term_total_rows()) {
+			/* Clicking the selected clipboard row again opens it for
+			 * typing, the way clicking a selected keybinding row again
+			 * starts a rebind. */
+			bool again = (listrow == s->sel);
 			s->sel = listrow;
-			settings_damage(s);
+			if (again && listrow == TERM_ROW_CLIPBOARD) {
+				term_edit_start(wm);
+			} else {
+				settings_damage(s);
+			}
 		}
 		return;
 	}
@@ -2024,6 +2138,12 @@ void settings_scroll(WM *wm, int dir)
 		return;
 	}
 	if (s->view == SETTINGS_VIEW_TERMINAL) {
+		if (s->editing) {
+			return;
+		}
+		if (s->sel == TERM_ROW_CLIPBOARD) {
+			return; /* a typed row has no notches to turn */
+		}
 		term_adjust(wm, s->sel,
 			    dir < 0 ? +1 : -1); /* wheel up raises the value */
 		return;
@@ -2306,6 +2426,20 @@ static void draw_terminal(WM *wm, struct ncplane *p, int W, int H)
 		draw_row(wm, p, 1 + i, W, tr->label, val, i == s->sel, false);
 	}
 
+	/* The clipboard command: the live edit buffer while it is being typed,
+	 * otherwise the command itself (or that there isn't one). */
+	if (s->editing && s->edit_kind == EDIT_CLIPBOARD_CMD) {
+		char buf[sizeof(s->input) + 2];
+		snprintf(buf, sizeof(buf), "%s_", s->input);
+		draw_row(wm, p, 1 + TERM_ROW_CLIPBOARD, W, "Copy also runs",
+			 buf, true, false);
+	} else {
+		draw_row(wm, p, 1 + TERM_ROW_CLIPBOARD, W, "Copy also runs",
+			 wm->config.clipboard_cmd ? wm->config.clipboard_cmd :
+						    "(none)",
+			 s->sel == TERM_ROW_CLIPBOARD, false);
+	}
+
 	/* Status + hint lines (mirrors the keybinding editor's footer). */
 	vp_setbg(p, wm->theme.panel_bg);
 	vp_setfg(p, wm->theme.panel_status);
@@ -2316,7 +2450,7 @@ static void draw_terminal(WM *wm, struct ncplane *p, int W, int H)
 	vp_setfg(p, wm->theme.panel_hint);
 	char hbuf[128];
 	snprintf(hbuf, sizeof(hbuf), "%-*.*s", W - 4, W - 4,
-		 "↑/↓ select · ←/→ adjust · S save · Esc back");
+		 "↑/↓ select · ←/→ adjust · Enter edit · D clear · S save");
 	ncplane_putstr_yx(p, H - 2, 2, hbuf);
 }
 

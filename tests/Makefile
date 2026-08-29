@@ -27,6 +27,7 @@ check: all
 	@$(MAKE) -C unit check
 	@echo "=== ui_shots ==="   && python3 ui_shots.py --quiet
 	@echo "=== fade_probe ===" && python3 fade_probe.py
+	@echo "=== select_probe ===" && python3 select_probe.py --quiet
 
 clean:
 	$(RM) $(BINS)

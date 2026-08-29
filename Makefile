@@ -12,7 +12,7 @@ CFLAGS  += $(shell pkg-config --cflags $(PKGS))
 LDLIBS  += $(shell pkg-config --libs $(PKGS)) -lgpm -lutil
 
 BIN      = viewpoint
-OBJS     = main.o pty.o session.o vt_bridge.o compositor.o window.o wm.o input.o taskbar.o config.o settings.o sixel.o theme.o sizeosd.o
+OBJS     = main.o pty.o session.o vt_bridge.o compositor.o window.o wm.o input.o taskbar.o config.o settings.o sixel.o theme.o sizeosd.o selection.o
 
 # Phase 1 builds with a subset; the full target needs every unit. To bring up
 # an earlier phase, override OBJS on the command line, e.g.:

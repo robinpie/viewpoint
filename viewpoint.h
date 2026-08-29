@@ -68,6 +68,12 @@
  * double-click (which toggles maximize). */
 #define VP_DBLCLICK_MS 400
 
+/* Clipboard: the largest text we will hand the host terminal through OSC 52.
+ * Terminals cap what they accept and a very long escape can wedge a slow one,
+ * so past this the copy still lands in the internal register (and any
+ * clipboard_command helper), just not in the host's clipboard. */
+#define VP_OSC52_MAX 100000
+
 /* Minimum gap (milliseconds) between title re-derivations for one window.
  * window_refresh_title polls /proc; this keeps a window streaming output from
  * re-polling on every render pass. */
@@ -198,6 +204,9 @@ typedef enum {
      * retained history. */
 	ACT_SCROLL_UP,
 	ACT_SCROLL_DOWN,
+	/* Copy the focused window's selection; paste the register into it. */
+	ACT_COPY,
+	ACT_PASTE,
 	/* Focus/restore the window in taskbar slot N. Kept contiguous (slot N is
      * ACT_SLOT_1 + (N-1)) so the dispatcher can recover the slot index. */
 	ACT_SLOT_1,
@@ -253,6 +262,12 @@ typedef struct VpConfig {
 	 * is dropped the instant its hold expires instead of fading out. */
 	bool sizeosd_fade;
 
+	/* Shell command a copy pipes the selected text into (e.g. "wl-copy" or
+	 * "xclip -selection clipboard"), or NULL for none. The internal register
+	 * and OSC 52 are always tried; this is the escape hatch for hosts where
+	 * OSC 52 is disabled. */
+	char *clipboard_cmd;
+
 	/* Desktop launcher icon positions (top-left cell). -1 = unset, fall back
 	 * to the built-in placement. Set once the user drags an icon. */
 	int settings_icon_y, settings_icon_x;
@@ -304,6 +319,7 @@ typedef enum {
 	SETTING_KEEP_CUSTOM,
 	SETTING_LAUNCHERS,
 	SETTING_SIZEOSD_FADE,
+	SETTING_CLIPBOARD_CMD,
 } vp_setting;
 
 /* ------------------------------------------------------------------------- */
@@ -327,6 +343,14 @@ typedef struct vp_image {
 	int col; /* anchor column (content-relative) */
 	int cell_h, cell_w; /* footprint in cells */
 } vp_image;
+
+/* What a drag selects: characters, whole words, or whole lines. Set by the
+ * click count that began the selection (single / double / triple). */
+typedef enum {
+	SEL_CHAR = 0,
+	SEL_WORD,
+	SEL_LINE,
+} vp_selmode;
 
 typedef struct Window {
 	int id; /* stable, monotonic per session */
@@ -387,6 +411,18 @@ typedef struct Window {
 	vp_image *images;
 	int nimages, images_cap;
 
+	/* Mouse text selection (selection.c). The anchor (where the drag began)
+	 * and cursor (where it is now) are held raw and unordered; sel_range()
+	 * orders them and applies sel_mode. Rows are *absolute* scrollback rows -
+	 * the same coordinate space sixel images are anchored in - so a selection
+	 * stays on its text while output streams in below it or the view scrolls.
+	 */
+	bool sel_active;
+	bool sel_moved; /* the drag has left the cell it started on */
+	int64_t sel_ar, sel_br; /* anchor / cursor row (absolute) */
+	int sel_ac, sel_bc; /* anchor / cursor column */
+	vp_selmode sel_mode;
+
 	/* CLOCK_MONOTONIC (ns) throttling window_refresh_title's /proc poll. */
 	uint64_t title_poll_ns;
 
@@ -402,6 +438,7 @@ typedef enum {
 	DRAG_MOVE,
 	DRAG_RESIZE,
 	DRAG_CONTENT, /* button held over a window's content; route to the app */
+	DRAG_SELECT, /* button held over a window's content; selecting text */
 	DRAG_ICON, /* a desktop launcher icon (Settings / Exit) is being dragged */
 } vp_dragkind;
 
@@ -545,6 +582,18 @@ typedef struct WM {
 	 * that didn't move it can be treated as a plain click instead. */
 	vp_layer *drag_icon;
 	int drag_icon_y0, drag_icon_x0;
+
+	/* Clipboard register: the last text copied out of a window, and what a
+	 * paste sends back in. Owned here, so it outlives the window it came from
+	 * and can be pasted into another one. */
+	char *clipboard;
+	size_t clip_len;
+
+	/* Content double/triple-click tracking (selects a word / a line). */
+	uint64_t last_selclick_ns;
+	int last_selclick_win; /* id of the window it landed on (0 = none) */
+	int last_selclick_row, last_selclick_col; /* content-relative cell */
+	int selclick_count; /* 1 = char, 2 = word, 3 = line, then wraps */
 
 	/* Title-bar double-click tracking (double-click toggles maximize). */
 	uint64_t last_titleclick_ns; /* CLOCK_MONOTONIC of the last move-region click */
@@ -692,11 +741,64 @@ void vt_send_key(Window *w, const ncinput *ni);
 void vt_mouse_move(Window *w, int row, int col, VTermModifier mod);
 void vt_mouse_button(Window *w, int button, bool pressed, VTermModifier mod);
 
+/* Read the cell at an absolute scrollback row (the Window.scroll_base space),
+ * from retained history or the live screen as that row demands. False if the
+ * row has scrolled out of history, is below the live screen, or the column is
+ * past the end of that line. */
+bool vt_cell_abs(const Window *w, int64_t abs_row, int col,
+		 VTermScreenCell *out);
+
+/* How many columns that absolute row holds: a history line keeps the width the
+ * window had when it scrolled off, which may be narrower than it is now. */
+int vt_row_width(const Window *w, int64_t abs_row);
+
+/* Send text to the child as a paste: bracketed (so a well-behaved app can tell
+ * it from typing), newlines as Enter, other control characters dropped. */
+void vt_paste(Window *w, const char *text, size_t len);
+
 void vt_free(Window *w);
 
 /* Write a reply (DA/XTSMGRAPHICS responses) from the emulator back to the
  * child on the PTY master. */
 void vt_reply(Window *w, const char *bytes, size_t len);
+
+/* ------------------------------------------------------------------------- */
+/* selection.c                                                               */
+/* ------------------------------------------------------------------------- */
+
+/* Begin / extend / drop a selection. sel_start's row and col are content-
+ * relative (the visible grid); it also drops any other window's selection,
+ * since only one is live at a time. */
+void sel_start(WM *wm, Window *w, int row, int col, vp_selmode mode);
+void sel_extend(Window *w, int row, int col);
+void sel_clear(Window *w);
+void sel_clear_all(WM *wm);
+
+/* The selection as an ordered, mode-expanded range: [r0,c0] .. [r1,c1), in
+ * absolute rows. False when there is no selection, or all of it has scrolled
+ * out of retained history. */
+bool sel_range(const Window *w, int64_t *r0, int *c0, int64_t *r1, int *c1);
+
+/* Which columns of visible row `row` are selected, as [c0,c1). False if none
+ * are. This is the render path's question (see vt_render). */
+bool sel_row_span(const Window *w, int row, int *c0, int *c1);
+
+/* The selected text as UTF-8: trailing blanks trimmed per row, rows joined
+ * with newlines. malloc'd (caller frees), NULL if nothing is selected. */
+char *sel_text(const Window *w, size_t *len_out);
+
+/* Extract the selection and put it on the clipboard. Silent no-op if the
+ * window has no selection. */
+void sel_copy(WM *wm, Window *w);
+
+/* Set / read the clipboard register. clipboard_set also pushes the text to the
+ * host terminal (OSC 52) and to config.clipboard_cmd, where those apply. */
+void clipboard_set(WM *wm, const char *text, size_t len);
+const char *clipboard_get(const WM *wm, size_t *len);
+void clipboard_free(WM *wm);
+
+/* Paste the register into a window (nothing if either is empty). */
+void clipboard_paste(WM *wm, Window *w);
 
 /* ------------------------------------------------------------------------- */
 /* sixel.c                                                                   */
@@ -825,6 +927,12 @@ void keymap_format_chord(uint32_t id, unsigned mods, char *buf, size_t n);
  * if nothing is bound to it. */
 bool keymap_chord_for_action(const VpConfig *cfg, vp_action act, char *buf,
 			     size_t n);
+/* True when the event is only a modifier or lock key changing state. Those
+ * never reach a program, so nothing downstream should treat them as typing -
+ * notably, holding Alt to press the copy chord must not clear the selection
+ * the chord is about to copy. */
+bool input_key_is_modifier(const ncinput *ni);
+
 /* Translate a live keypress to a chord; false for bare modifiers/locks/mouse. */
 bool keymap_chord_from_input(const ncinput *ni, uint32_t *id, unsigned *mods);
 /* Bind `act` to exactly (id,mods), dropping its previous chord(s). */

@@ -56,6 +56,8 @@ These are the default keybinds. They are fully editable through an in-app settin
 | `Alt`+`←`/`→`/`↑`/`↓`         | Move focused window                      |
 | `Alt`+`Shift`+`←`/`→`/`↑`/`↓` | Resize focused window                    |
 | `Shift`+`PgUp` / `Shift`+`PgDn` | Scroll the focused window's scrollback back / forward |
+| `Alt`+`c`                     | Copy the focused window's selection       |
+| `Alt`+`v`                     | Paste into the focused window            |
 | `Alt`+`,` / `Alt`+`.`         | Scroll the taskbar left / right (when more windows are open than fit) |
 
 ### Mouse
@@ -66,6 +68,10 @@ These are the default keybinds. They are fully editable through an in-app settin
 | Click `[_]` / `[▢]` / `[x]` title buttons     | Minimize / maximize / close              |
 | Drag the title bar                            | Move the window                          |
 | Drag a window border or corner                | Resize the window                        |
+| Drag across a window's text                   | Select it (`Alt`+`c` copies it) |
+| Double-click / triple-click text              | Select the word / the whole line |
+| `Shift`+drag                                  | Select even when the app grabbed the mouse |
+| Middle-click a window                         | Paste into it |
 | Scroll the wheel over a window                | Scroll its scrollback (forwarded to the app instead if it grabbed the mouse) |
 | Drag the title bar to a screen edge / corner  | Snap to half / quarter (outline preview shown; applied on release) |
 | Click a taskbar slot                          | Focus, restore if minimized, or minimize if already focused |
@@ -109,6 +115,7 @@ The `Terminal` tile adjusts per-window scrollback behavior:
 
 - `↑`/`↓` (or click a row) to select a setting
 - `←`/`→` (or the mouse wheel) to adjust it — `Scrollback lines` (history retained per window; `0` disables it) and `Scroll step` (lines moved per wheel notch). Changes apply to open windows immediately.
+- `Enter` on `Copy also runs` (or click the row again) to type the shell command a copy pipes the selected text into, e.g. `wl-copy`
 - `S` to save now, `Esc` (or click outside the panel) to return to the grid
 
 The `Animations` tile switches animated chrome on and off.
@@ -147,6 +154,10 @@ toggle = f12
 scrollback  = 2000   # per-window scrollback lines (0 disables it)
 scroll_step = 3      # lines scrolled per mouse-wheel notch
 
+# A copy also pipes the selected text into this shell command (the internal
+# register and OSC 52 are always used; this is for hosts that refuse OSC 52):
+clipboard_command = wl-copy
+
 # Animations (default true): fade the resize size indicator out, rather than
 # dropping it the instant its hold expires.
 size_indicator_fade = true
@@ -184,7 +195,7 @@ launcher = 2 12 Logs | journalctl -f | less
 
 A chord is an optional `alt+`/`shift+`/`ctrl+` modifier prefix followed by a key: a single character (`n`, `x`), a function key (`f1`…`f60`), or a named key (`tab`, `enter`, `esc`, `space`, `left`/`right`/`up`/`down`, `home`, `end`, `pgup`, `pgdn`, `delete`, `insert`, `backspace`).
 
-The available actions are: `focus_next`, `focus_prev`, `new`, `close`, `minimize`, `maximize`, `move_left`/`move_right`/`move_up`/`move_down`, `resize_left`/`resize_right`/`resize_up`/`resize_down`, `scroll_up`/`scroll_down` (scroll the focused window's scrollback history), `slot1`…`slot9` (focus/restore the window in taskbar slot N), and `taskbar_left`/`taskbar_right` (scroll the taskbar's window slots).
+The available actions are: `focus_next`, `focus_prev`, `new`, `close`, `minimize`, `maximize`, `move_left`/`move_right`/`move_up`/`move_down`, `resize_left`/`resize_right`/`resize_up`/`resize_down`, `scroll_up`/`scroll_down` (scroll the focused window's scrollback history), `copy`/`paste`, `slot1`…`slot9` (focus/restore the window in taskbar slot N), and `taskbar_left`/`taskbar_right` (scroll the taskbar's window slots).
 
 ## Graphics
 

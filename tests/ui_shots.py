@@ -28,8 +28,8 @@ import sys
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 
-from vpdrive import (DOWN, ENTER, ESC, RIGHT, Checks, Session,  # noqa: E402
-                     main_guard)
+from vpdrive import (DOWN, ENTER, ESC, RIGHT, UP, Checks,  # noqa: E402
+                     Session, main_guard)
 
 QUIET = "--quiet" in sys.argv
 
@@ -70,12 +70,33 @@ def run():
 
         vp.send(ESC)   # back to the grid
         vp.settle()
+
+        # The Terminal tile (top row, second column - one up from Animations).
+        vp.send(UP)
+        vp.settle()
+        vp.send(ENTER)
+        scr = vp.wait_text("Copy also runs")
+        shot(vp, "Terminal view")
+        c.check("Copy also runs" in scr, "the clipboard command row is listed")
+        c.check("(none)" in scr, "with no command set to begin with")
+
+        vp.send(DOWN + DOWN + ENTER)     # onto the row, then open it for typing
+        vp.wait_text("Type a shell command")
+        vp.send(b"wl-copy" + ENTER)
+        scr = vp.wait_text("Clipboard command set")
+        shot(vp, "after typing a clipboard command")
+        c.check("wl-copy" in scr, "the row shows what was typed")
+
+        vp.send(ESC)   # back to the grid
+        vp.settle()
         vp.send(ESC)   # close the panel, which saves
         vp.settle()
 
         conf = vp.read_config()
         c.check("size_indicator_fade = false" in conf,
                 "the choice was written to viewpoint.conf")
+        c.check("clipboard_command = wl-copy" in conf,
+                "and so was the clipboard command")
         if not QUIET:
             print("----- viewpoint.conf " + "-" * 42)
             print(conf)

@@ -153,6 +153,50 @@ static sb_line *sb_get(Window *w, int i)
 	return &w->sb[(w->sb_head + i) % w->sb_cap];
 }
 
+static const sb_line *sb_get_const(const Window *w, int i)
+{
+	return &w->sb[(w->sb_head + i) % w->sb_cap];
+}
+
+/* Read one cell in the absolute-row coordinate space, from whichever of the
+ * two stores owns that row: retained history below scroll_base, the live
+ * libvterm screen at and above it. The selection code works in these
+ * coordinates, and this is the only place that has to know they span both. */
+bool vt_cell_abs(const Window *w, int64_t abs_row, int col,
+		 VTermScreenCell *out)
+{
+	if (col < 0) {
+		return false;
+	}
+	int64_t oldest = w->scroll_base - w->sb_count;
+	if (abs_row < oldest) {
+		return false; /* scrolled out of retained history */
+	}
+	if (abs_row < w->scroll_base) {
+		const sb_line *ln = sb_get_const(w, (int)(abs_row - oldest));
+		if (col >= ln->cols) {
+			return false;
+		}
+		*out = ln->cells[col];
+		return true;
+	}
+	int srow = (int)(abs_row - w->scroll_base);
+	if (srow >= w->rows || col >= w->cols) {
+		return false;
+	}
+	VTermPos pos = { .row = srow, .col = col };
+	return vterm_screen_get_cell(w->vts, pos, out) != 0;
+}
+
+int vt_row_width(const Window *w, int64_t abs_row)
+{
+	int64_t oldest = w->scroll_base - w->sb_count;
+	if (abs_row >= oldest && abs_row < w->scroll_base) {
+		return sb_get_const(w, (int)(abs_row - oldest))->cols;
+	}
+	return w->cols;
+}
+
 static int cb_sb_pushline(int cols, const VTermScreenCell *cells, void *user)
 {
 	Window *w = user;
@@ -241,6 +285,7 @@ static int cb_sb_clear(void *user)
 	w->sb_count = 0;
 	w->sb_head = 0;
 	w->sb_offset = 0;
+	sel_clear(w);
 	sixel_images_clear(w);
 	dmg_full(w);
 	window_damage_content(w, false);
@@ -438,6 +483,9 @@ void vt_resize(Window *w, int rows, int cols)
 	/* Snap back to the live screen: the reflow that vterm_set_size triggers
      * makes a held scrollback offset meaningless. */
 	w->sb_offset = 0;
+	/* Reflow moves the text out from under any highlight, and the absolute
+	 * rows it was anchored to no longer mean what they did. */
+	sel_clear(w);
 	/* Reflow moves content in ways we can't track for fixed pixel placement,
      * and the cell-pixel geometry may differ; drop the images. */
 	sixel_images_clear(w);
@@ -534,6 +582,79 @@ void vt_free(Window *w)
 		w->sb = NULL;
 		w->sb_cap = w->sb_count = w->sb_head = w->sb_offset = 0;
 	}
+}
+
+/* Decode the next UTF-8 codepoint at *p (advancing it), or U+FFFD on a bad
+ * sequence - a paste comes from outside and can hold anything. */
+static uint32_t utf8_next(const char **p, const char *end)
+{
+	const unsigned char *s = (const unsigned char *)*p;
+	unsigned char c = *s;
+	int extra;
+	uint32_t cp;
+	if (c < 0x80) {
+		*p += 1;
+		return c;
+	} else if ((c & 0xE0) == 0xC0) {
+		extra = 1;
+		cp = c & 0x1F;
+	} else if ((c & 0xF0) == 0xE0) {
+		extra = 2;
+		cp = c & 0x0F;
+	} else if ((c & 0xF8) == 0xF0) {
+		extra = 3;
+		cp = c & 0x07;
+	} else {
+		*p += 1;
+		return 0xFFFD;
+	}
+	if (end - *p < extra + 1) {
+		*p = end;
+		return 0xFFFD;
+	}
+	for (int i = 1; i <= extra; i++) {
+		if ((s[i] & 0xC0) != 0x80) {
+			*p += 1;
+			return 0xFFFD;
+		}
+		cp = (cp << 6) | (s[i] & 0x3F);
+	}
+	*p += extra + 1;
+	return cp;
+}
+
+void vt_paste(Window *w, const char *text, size_t len)
+{
+	if (!w || !text || len == 0) {
+		return;
+	}
+	const char *p = text, *end = text + len;
+	/* Bracketed, so an app that asked to tell pasting from typing can (and one
+	 * that didn't sees plain keystrokes, which is what it expects). */
+	vterm_keyboard_start_paste(w->vt);
+	while (p < end) {
+		uint32_t cp = utf8_next(&p, end);
+		if (cp == '\r' || cp == '\n') {
+			/* Collapse CRLF, and send the line break the way the app's
+			 * current newline mode wants it. */
+			if (cp == '\r' && p < end && *p == '\n') {
+				p++;
+			}
+			vterm_keyboard_key(w->vt, VTERM_KEY_ENTER,
+					   VTERM_MOD_NONE);
+			continue;
+		}
+		if (cp == '\t') {
+			vterm_keyboard_key(w->vt, VTERM_KEY_TAB,
+					   VTERM_MOD_NONE);
+			continue;
+		}
+		if (cp < 0x20 || cp == 0x7F) {
+			continue; /* other control bytes are never wanted */
+		}
+		vterm_keyboard_unichar(w->vt, cp, VTERM_MOD_NONE);
+	}
+	vterm_keyboard_end_paste(w->vt);
 }
 
 void vt_key_unichar(Window *w, uint32_t c, VTermModifier mod)
@@ -743,10 +864,39 @@ static void apply_styles(struct ncplane *n, cellcache *cc, unsigned styles)
 	}
 }
 
+/* The emulator's default fg/bg as concrete colors, with the "this is the
+ * default" flags cleared so they can be applied as ordinary ones (which is how
+ * a selected blank gets a visible swap). Fetched once per sweep. */
+typedef struct {
+	VTermColor fg, bg;
+} vt_defcolors;
+
+static vt_defcolors default_colors(Window *w)
+{
+	vt_defcolors d;
+	vterm_state_get_default_colors(vterm_obtain_state(w->vt), &d.fg, &d.bg);
+	d.fg.type &= ~(VTERM_COLOR_DEFAULT_FG | VTERM_COLOR_DEFAULT_BG);
+	d.bg.type &= ~(VTERM_COLOR_DEFAULT_FG | VTERM_COLOR_DEFAULT_BG);
+	return d;
+}
+
 /* Paint a default-colored blank (used to pad history lines narrower than the
  * window). Goes through the cache like a real cell so state stays in sync. */
-static void paint_blank(struct ncplane *n, cellcache *cc, int row, int col)
+static void paint_blank(struct ncplane *n, const VTermScreen *vts,
+			cellcache *cc, int row, int col, bool sel,
+			const vt_defcolors *def)
 {
+	/* A selected blank still has to read as selected, and "default on default"
+	 * has no colors to swap - so it is painted with the emulator's default
+	 * pair swapped explicitly. */
+	if (sel) {
+		apply_fg(n, vts, cc, def->bg);
+		apply_bg(n, vts, cc, def->fg);
+		apply_styles(n, cc, NCSTYLE_NONE);
+		cc->init = true;
+		ncplane_putegc_yx(n, row, col, " ", NULL);
+		return;
+	}
 	if (!cc->init || !cc->fg_def) {
 		ncplane_set_fg_default(n);
 		cc->fg_def = true;
@@ -763,11 +913,14 @@ static void paint_blank(struct ncplane *n, cellcache *cc, int row, int col)
 /* Paint one cell onto the content plane at (row,col). The trailing column of a
  * wide glyph (width 0) must be skipped by the caller before this is reached. */
 static void paint_cell(struct ncplane *n, const VTermScreen *vts, cellcache *cc,
-		       int row, int col, const VTermScreenCell *cell)
+		       int row, int col, const VTermScreenCell *cell, bool sel)
 {
 	VTermColor fg = cell->fg;
 	VTermColor bg = cell->bg;
-	if (cell->attrs.reverse) {
+	/* Selection is drawn as a swap, so it composes with the cell's own reverse
+	 * attribute the way two swaps do: reversed text inside a selection comes
+	 * back to normal, which is what every other terminal does too. */
+	if (cell->attrs.reverse != sel) {
 		VTermColor t = fg;
 		fg = bg;
 		bg = t;
@@ -824,14 +977,20 @@ void vt_render(Window *w)
 	}
 
 	cellcache cc = { 0 };
+	vt_defcolors def = default_colors(w);
 
 	/* Visible row r maps to combined index (sb_count - off) + r: indices below
 	 * sb_count are retained history, the rest live screen rows. */
 	for (int row = r0; row < r1; row++) {
 		int ci = w->sb_count - off + row;
+		/* Selected columns of this row, as [sc0,sc1). Asked once per row:
+		 * the answer is a span, not a per-cell property. */
+		int sc0 = 0, sc1 = 0;
+		bool has_sel = sel_row_span(w, row, &sc0, &sc1);
 		if (ci < w->sb_count) {
 			const sb_line *ln = sb_get(w, ci);
 			for (int col = 0; col < w->cols; col++) {
+				bool sel = has_sel && col >= sc0 && col < sc1;
 				if (col < ln->cols) {
 					const VTermScreenCell *cell =
 						&ln->cells[col];
@@ -839,18 +998,20 @@ void vt_render(Window *w)
 						continue;
 					}
 					paint_cell(n, w->vts, &cc, row, col,
-						   cell);
+						   cell, sel);
 					if (cell->width == 2) {
 						col++; /* skip the trailing half */
 					}
 				} else {
 					/* History line narrower than the window: pad with a blank. */
-					paint_blank(n, &cc, row, col);
+					paint_blank(n, w->vts, &cc, row, col,
+						    sel, &def);
 				}
 			}
 		} else {
 			int srow = ci - w->sb_count;
 			for (int col = 0; col < w->cols; col++) {
+				bool sel = has_sel && col >= sc0 && col < sc1;
 				VTermPos pos = { .row = srow, .col = col };
 				VTermScreenCell cell;
 				if (vterm_screen_get_cell(w->vts, pos, &cell) ==
@@ -860,7 +1021,8 @@ void vt_render(Window *w)
 				if (cell.width == 0) {
 					continue;
 				}
-				paint_cell(n, w->vts, &cc, row, col, &cell);
+				paint_cell(n, w->vts, &cc, row, col, &cell,
+					   sel);
 				if (cell.width == 2) {
 					col++; /* skip the trailing half */
 				}

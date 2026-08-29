@@ -20,13 +20,13 @@ ROOT     = ../..
 SRCS = $(ROOT)/pty.c $(ROOT)/session.c $(ROOT)/vt_bridge.c \
        $(ROOT)/compositor.c $(ROOT)/window.c $(ROOT)/wm.c $(ROOT)/input.c \
        $(ROOT)/taskbar.c $(ROOT)/config.c $(ROOT)/settings.c $(ROOT)/sixel.c \
-       $(ROOT)/theme.c $(ROOT)/sizeosd.c
+       $(ROOT)/theme.c $(ROOT)/sizeosd.c $(ROOT)/selection.c
 
 # fade_test.c #includes sizeosd.c to reach its file-static helpers, so it must
 # not also be handed the standalone copy.
 FADE_SRCS = $(filter-out $(ROOT)/sizeosd.c,$(SRCS))
 
-TESTS = fade_test config_test
+TESTS = fade_test config_test sel_test
 
 all: $(TESTS)
 
@@ -35,6 +35,9 @@ fade_test: fade_test.c check.h $(FADE_SRCS)
 
 config_test: config_test.c check.h $(SRCS)
 	$(CC) $(CFLAGS) -o $@ config_test.c $(SRCS) $(LDLIBS)
+
+sel_test: sel_test.c check.h $(SRCS)
+	$(CC) $(CFLAGS) -o $@ sel_test.c $(SRCS) $(LDLIBS)
 
 check: $(TESTS)
 	@rc=0; \

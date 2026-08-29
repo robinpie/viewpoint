@@ -87,6 +87,14 @@ static void handle_input(WM *wm, bool *quit)
 		}
 		Window *f = wm_focused(wm);
 		if (f) {
+			/* Typing into a window ends its selection, the same way it
+			 * does in a terminal that owns its own scrollback - but a
+			 * bare modifier is not typing. Clearing on those would make
+			 * the copy chord unusable: pressing Alt would wipe the
+			 * selection before the 'c' ever arrived. */
+			if (!input_key_is_modifier(&ni)) {
+				sel_clear(f);
+			}
 			vt_send_key(f, &ni);
 		}
 	}
@@ -295,6 +303,7 @@ int main(int argc, char **argv)
 	comp_destroy(wm.comp); /* whatever is left: the pointer, stray layers */
 	wm.comp = NULL;
 	config_free(&wm.config);
+	clipboard_free(&wm);
 	gpm_teardown(&wm);
 	/* Undo the motion-tracking modes we re-asserted (notcurses_stop resets the
      * modes it set itself, but not our extra 1002). Console runs never set them. */

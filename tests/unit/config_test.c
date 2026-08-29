@@ -174,6 +174,45 @@ int main(void)
 	      "an unrelated hand-written key is not reported as shadowing");
 	config_free(&c);
 
+	printf("clipboard_command (a string setting, same five obligations):\n");
+	config_defaults(&c);
+	CHECK(c.clipboard_cmd == NULL, "no clipboard helper by default");
+	config_free(&c);
+
+	wipe_conf();
+	write_conf("clipboard_command = wl-copy\n");
+	config_defaults(&c);
+	config_load(&c);
+	CHECK(c.clipboard_cmd && strcmp(c.clipboard_cmd, "wl-copy") == 0,
+	      "a command is parsed (\"%s\")",
+	      c.clipboard_cmd ? c.clipboard_cmd : "(null)");
+	config_free(&c);
+
+	write_conf("clipboard_command =\n");
+	config_defaults(&c);
+	config_load(&c);
+	CHECK(c.clipboard_cmd == NULL, "an empty value clears it again");
+	config_free(&c);
+
+	wipe_conf();
+	config_defaults(&c);
+	config_save(&c);
+	CHECK(strstr(read_conf(), "clipboard_command") == NULL,
+	      "unset, the key is left out of the file entirely");
+	c.clipboard_cmd = strdup("xclip -selection clipboard");
+	config_save(&c);
+	CHECK(strstr(read_conf(),
+		     "clipboard_command = xclip -selection clipboard") != NULL,
+	      "set, it is written whole - arguments and all");
+	config_free(&c);
+
+	config_defaults(&c);
+	config_load(&c);
+	CHECK(c.clipboard_cmd &&
+		      strcmp(c.clipboard_cmd, "xclip -selection clipboard") == 0,
+	      "and comes back the same on reload");
+	config_free(&c);
+
 	char cleanup[600];
 	snprintf(cleanup, sizeof(cleanup), "rm -rf '%s'", tmpdir);
 	if (system(cleanup) != 0) {

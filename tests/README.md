@@ -61,6 +61,9 @@ Both are runnable checks and both double as the documentation for `vpdrive`.
 - `ui_shots.py` walks the settings panel: opens it, checks every tile is on the
   grid, flips the size-indicator switch, and confirms the choice reached
   `viewpoint.conf`. `--quiet` prints only the checks, not the screens.
+- `select_probe.py` drags the mouse across a word in a live shell, checks the
+  highlight landed on exactly those cells, and pastes the text back to prove it
+  made the round trip out to the clipboard and in again.
 - `fade_probe.py` resizes a window and samples the size indicator's border color
   over its whole life, with the fade both on and off. Run it to *see* the ramp:
 
@@ -82,6 +85,10 @@ files are never touched.
 - `fade_test.c` — the size indicator's clock. `#include`s `sizeosd.c` to reach
   the file-static helpers, then winds the "when did the box appear" timestamp
   back and asks what it thinks at each point in the timeline.
+- `sel_test.c` — what a selection covers and what comes out of it, over a
+  window built by hand: a real libvterm screen for the live rows and
+  hand-rolled `sb_line`s for the history, so the extractor is asked about the
+  seam between the two stores that is the whole reason it can go wrong.
 - `config_test.c` — a setting's round trip through `config.c`: default, parse,
   a write that stays quiet at the default, a reload that agrees, and an honest
   answer about whether the manual section shadows it. A new setting can copy the
